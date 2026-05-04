@@ -1,92 +1,28 @@
 # Render deployment blueprint — Creative Automation Pipeline v3
-#
-# Deploy to Render:
-#   1. Fork this repo to your GitHub account
-#   2. Go to https://dashboard.render.com → New → Blueprint
-#   3. Connect your repo — Render will detect this render.yaml
-#   4. Set the secret env vars (marked sync: false) in the Render dashboard
-#   5. Click "Apply" — both services deploy automatically
-#
-# Services:
-#   creative-pipeline-backend  — FastAPI + LangGraph (port 8000)
-#   creative-pipeline-frontend — React + Vite + nginx (port 80)
-#
-# Persistent disk (backend):
-#   Assets are stored on a 10GB Render disk at /workspace/outputs.
-#   For production at scale, switch STORAGE_BACKEND=supabase and set
-#   SUPABASE_URL + SUPABASE_SERVICE_KEY to use Supabase Storage instead.
-#
-# Scaling to multiple instances:
-#   MemorySaver (in-process LangGraph checkpointing) works for a single
-#   instance. For multi-instance, switch to AsyncPostgresSaver:
-#     pip install langgraph-checkpoint-postgres
-#     Set DATABASE_URL to your Postgres connection string
-#     Update pipeline.py to use AsyncPostgresSaver
-
 services:
-  # ── Backend: FastAPI + LangGraph ─────────────────────────────────────────
   - type: web
     name: creative-pipeline-backend
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile
+    dockerfilePath: ./Dockerfile
     dockerContext: .
-    plan: starter          # upgrade to standard for production workloads
+    plan: starter
     healthCheckPath: /api/health
     envVars:
-      # ── Required secrets (set in Render dashboard, not committed to repo) ──
       - key: GEMINI_API_KEY
-        sync: false        # set manually in Render dashboard
-
+        sync: false
       - key: PIPELINE_API_KEY
-        sync: false        # set manually — leave empty to disable auth in dev
-
-      # ── Optional: Supabase (for Realtime + cloud storage) ─────────────────
-      - key: SUPABASE_URL
         sync: false
-      - key: SUPABASE_SERVICE_KEY
-        sync: false
-      - key: SUPABASE_ANON_KEY
-        sync: false
-
-      # ── Provider config ───────────────────────────────────────────────────
       - key: IMAGE_PROVIDER
         value: gemini
       - key: LLM_PROVIDER
         value: gemini
       - key: STORAGE_BACKEND
-        value: local       # switch to 'supabase' when SUPABASE_* vars are set
-
-      # ── Pipeline tuning ───────────────────────────────────────────────────
-      - key: IMAGE_GEN_CONCURRENCY
-        value: "3"         # concurrent Gemini image API calls (semaphore cap)
-
-      # ── HITL threshold valves ─────────────────────────────────────────────
-      - key: HITL_AUTO_APPROVE
-        value: "0.85"      # score >= this → auto-approve, skip human review
-      - key: HITL_AUTO_REJECT
-        value: "0.60"      # score <  this → auto-reject, pipeline terminates
-
-      # ── CORS ──────────────────────────────────────────────────────────────
+        value: local
       - key: CORS_ORIGINS
-        value: "*"         # tighten to your frontend URL in production
-
-    disk:
-      name: pipeline-assets
-      mountPath: /workspace/outputs
-      sizeGB: 10           # persistent asset storage (requires paid Render plan)
-
-  # ── Frontend: React + Vite + nginx ───────────────────────────────────────
+        value: "*"
   - type: web
     name: creative-pipeline-frontend
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
     plan: starter
-    envVars:
-      # URL of the backend service (set after backend is deployed)
-      - key: VITE_API_URL
-        sync: false        # e.g. https://creative-pipeline-backend.onrender.com
-
-      # API key for frontend → backend auth (must match PIPELINE_API_KEY)
-      - key: VITE_API_KEY
-        sync: false        # leave empty if PIPELINE_API_KEY is not set
