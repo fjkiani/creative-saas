@@ -1,4 +1,4 @@
-# ── Stage 1: build ──────────────────────────────────────────────────────────
+# Stage 1: build
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -9,14 +9,15 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# ── Stage 2: serve ──────────────────────────────────────────────────────────
+# Stage 2: serve
 FROM nginx:alpine
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# SPA routing: all paths → index.html
+# SPA routing: all paths -> index.html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 80
+EXPOSE 10000
 
 CMD ["nginx", "-g", "daemon off;"]
+
