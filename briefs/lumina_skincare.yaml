@@ -1,0 +1,71 @@
+campaign_id: lumina-q2-2025
+brand: Lumina
+brand_config: lumina
+objective: >
+  Drive awareness and trial of the new Lumina Radiance Serum among
+  millennial and Gen-Z consumers seeking clean, science-backed skincare.
+tone: aspirational, clean, science-forward, inclusive
+products:
+  - id: radiance-serum
+    name: Lumina Radiance Serum
+    tagline: "Glow from within."
+    description: >
+      A lightweight, fast-absorbing vitamin C + niacinamide serum that
+      visibly brightens skin in 14 days. Fragrance-free, vegan, cruelty-free.
+    key_claims:
+      - "Clinically tested: 94% saw brighter skin in 14 days"
+      - Fragrance-free & hypoallergenic
+      - Vegan & cruelty-free
+    prohibited_claims:
+      - "cures"
+      - "treats acne"
+      - "FDA approved"
+    price_usd: 48
+    hero_color: "#F5E6D3"
+
+  - id: hydra-mist
+    name: Lumina Hydra Mist
+    tagline: "Refresh. Reset. Radiate."
+    description: >
+      A refreshing facial mist with hyaluronic acid and rose water.
+      Sets makeup, hydrates on the go.
+    key_claims:
+      - Instant hydration boost
+      - Sets makeup for up to 8 hours
+      - Suitable for all skin types
+    prohibited_claims:
+      - "treats rosacea"
+      - "medical grade"
+    price_usd: 28
+    hero_color: "#D4E8F0"
+
+markets:
+  - id: us
+    locale: en-US
+    currency: USD
+    platform: instagram
+    legal_footer: "Results may vary. Not intended to diagnose or treat any condition."
+
+  - id: uk
+    locale: en-GB
+    currency: GBP
+    platform: instagram
+    legal_footer: "Results may vary. For external use only."
+
+  - id: fr
+    locale: fr-FR
+    currency: EUR
+    platform: instagram
+    legal_footer: "Les résultats peuvent varier. Usage externe uniquement."
+
+aspect_ratios:
+  - "1:1"
+  - "9:16"
+  - "16:9"
+
+style_hints:
+  mood: soft, luminous, airy
+  palette: warm whites, blush pinks, soft gold accents
+  lighting: diffused natural light, soft shadows
+  photography_style: flat lay + lifestyle hybrid
+  avoid: dark backgrounds, harsh shadows, cluttered compositions

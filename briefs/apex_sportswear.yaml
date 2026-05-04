@@ -1,0 +1,72 @@
+campaign_id: apex-summer-2025
+brand: Apex
+brand_config: apex
+objective: >
+  Launch the Apex ProFlex collection targeting serious amateur athletes
+  aged 22-40 across North America and Germany. Drive direct-to-consumer
+  sales via Instagram and TikTok.
+tone: bold, energetic, performance-driven, authentic
+products:
+  - id: proflex-shorts
+    name: Apex ProFlex Training Shorts
+    tagline: "Move without limits."
+    description: >
+      4-way stretch training shorts with moisture-wicking fabric,
+      hidden zip pocket, and anti-chafe seams. Built for HIIT, running,
+      and cross-training.
+    key_claims:
+      - 4-way stretch for unrestricted movement
+      - Moisture-wicking — stays dry through the toughest workouts
+      - Anti-chafe flatlock seams
+    prohibited_claims:
+      - "guaranteed performance improvement"
+      - "medical compression"
+    price_usd: 65
+    hero_color: "#1A1A2E"
+
+  - id: velocity-tee
+    name: Apex Velocity Training Tee
+    tagline: "Built for the grind."
+    description: >
+      Ultra-lightweight performance tee with mesh ventilation panels
+      and reflective logo for low-light visibility. Recycled polyester blend.
+    key_claims:
+      - 30% lighter than standard training tees
+      - Mesh ventilation panels for airflow
+      - Made from 85% recycled materials
+    prohibited_claims:
+      - "UV protection SPF 50"
+      - "compression benefits"
+    price_usd: 45
+    hero_color: "#16213E"
+
+markets:
+  - id: us
+    locale: en-US
+    currency: USD
+    platform: instagram
+    legal_footer: "Individual results may vary."
+
+  - id: ca
+    locale: en-CA
+    currency: CAD
+    platform: instagram
+    legal_footer: "Individual results may vary."
+
+  - id: de
+    locale: de-DE
+    currency: EUR
+    platform: instagram
+    legal_footer: "Individuelle Ergebnisse können variieren."
+
+aspect_ratios:
+  - "1:1"
+  - "9:16"
+  - "16:9"
+
+style_hints:
+  mood: high-energy, gritty, motivational
+  palette: deep navy, electric blue, white, neon accent
+  lighting: dramatic side lighting, high contrast
+  photography_style: action shots, athlete in motion, gym environment
+  avoid: stock-photo feel, overly polished studio look, pastel colors

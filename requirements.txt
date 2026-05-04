@@ -1,0 +1,44 @@
+# ============================================================
+# Creative Automation Pipeline — Python Dependencies
+# ============================================================
+# Core versions validated against Python 3.11
+
+# ── Web framework ────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# ── LangGraph + LangChain ────────────────────────────────────
+langgraph>=0.2.60
+langchain-core>=0.3.25
+
+# ── LLM Providers ────────────────────────────────────────────
+google-genai>=1.5.0          # Gemini (default) — LLM + Imagen 3 image gen
+openai>=1.57.0               # GPT-4o LLM + DALL-E 3 image gen
+anthropic>=0.40.0            # Claude 3.5 Sonnet LLM
+instructor>=1.7.0            # Structured outputs across all LLM providers
+
+# ── Image processing ─────────────────────────────────────────
+Pillow>=11.0.0               # Compositor: crop, overlay, text, logo
+opencv-python-headless>=4.10.0.84  # Brand compliance: template matching, color analysis
+numpy>=1.26.0
+
+# ── Supabase ─────────────────────────────────────────────────
+supabase>=2.10.0             # Postgres DB + Storage + Realtime
+
+# ── Cloud storage (optional backends) ────────────────────────
+boto3>=1.35.0                # AWS S3 (STORAGE_BACKEND=s3)
+azure-storage-blob>=12.23.0  # Azure Blob (STORAGE_BACKEND=azure)
+dropbox>=12.0.0              # Dropbox (STORAGE_BACKEND=dropbox)
+
+# ── Utilities ────────────────────────────────────────────────
+pyyaml>=6.0.2
+python-dotenv>=1.0.1
+httpx>=0.27.0
+aiofiles>=24.1.0
+tenacity>=9.0.0              # Retry logic for all API calls
+structlog>=24.4.0            # Structured JSON logging
+rich>=13.9.0                 # CLI output formatting
+scikit-learn>=1.5.0          # k-means color clustering in compliance_post

@@ -1,0 +1,45 @@
+brand_id: lumina
+display_name: Lumina
+logo_file: lumina_logo.png
+
+colors:
+  primary: "#C9956A"       # warm gold
+  secondary: "#F5E6D3"     # blush
+  accent: "#8B6F5E"        # mocha
+  text_dark: "#2C1810"
+  text_light: "#FAF7F4"
+  background: "#FEFCFA"
+
+typography:
+  headline_font: "Arial"
+  body_font: "Arial"
+  headline_weight: 700
+  body_weight: 400
+
+overlay:
+  gradient_start: "rgba(201,149,106,0.0)"
+  gradient_end: "rgba(44,24,16,0.75)"
+  gradient_direction: "bottom"
+
+logo_placement:
+  position: "bottom_right"
+  padding_px: 24
+  max_width_fraction: 0.18
+
+text_placement:
+  tagline_position: "bottom_left"
+  tagline_padding_px: 24
+  tagline_font_size: 28
+  tagline_color: "#FAF7F4"
+  legal_font_size: 10
+  legal_color: "rgba(250,247,244,0.7)"
+
+compliance:
+  prohibited_words:
+    - "cure"
+    - "treat"
+    - "FDA approved"
+    - "guaranteed"
+    - "miracle"
+  required_disclaimer: true
+  max_health_claims: 3

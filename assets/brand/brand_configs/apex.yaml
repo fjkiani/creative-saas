@@ -1,0 +1,45 @@
+brand_id: apex
+display_name: Apex
+logo_file: apex_logo.png
+
+colors:
+  primary: "#0066FF"       # electric blue
+  secondary: "#1A1A2E"     # deep navy
+  accent: "#00D4FF"        # neon cyan
+  text_dark: "#0A0A1A"
+  text_light: "#FFFFFF"
+  background: "#0F0F1E"
+
+typography:
+  headline_font: "Arial"
+  body_font: "Arial"
+  headline_weight: 900
+  body_weight: 400
+
+overlay:
+  gradient_start: "rgba(0,102,255,0.0)"
+  gradient_end: "rgba(10,10,26,0.85)"
+  gradient_direction: "bottom"
+
+logo_placement:
+  position: "top_right"
+  padding_px: 20
+  max_width_fraction: 0.15
+
+text_placement:
+  tagline_position: "bottom_left"
+  tagline_padding_px: 24
+  tagline_font_size: 32
+  tagline_color: "#FFFFFF"
+  legal_font_size: 10
+  legal_color: "rgba(255,255,255,0.6)"
+
+compliance:
+  prohibited_words:
+    - "guaranteed performance"
+    - "medical"
+    - "clinical"
+    - "FDA"
+    - "cure"
+  required_disclaimer: true
+  max_health_claims: 2

@@ -1,0 +1,128 @@
+version: "3.8"
+
+# Creative Automation Pipeline v3 — local development stack
+#
+# Quick start:
+#   cp .env.example .env          # fill in GEMINI_API_KEY
+#   docker compose up --build
+#
+# Services:
+#   backend   → http://localhost:8000  (FastAPI + LangGraph)
+#   frontend  → http://localhost:5173  (React + Vite)
+#   supabase-db, supabase-realtime, supabase-storage (optional local Supabase)
+#
+# To run without Supabase (local storage only):
+#   docker compose up backend frontend
+
+services:
+  # ── Supabase local stack (optional) ──────────────────────────────────────
+  supabase-db:
+    image: supabase/postgres:15.6.1.143
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+      - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  supabase-realtime:
+    image: supabase/realtime:v2.30.34
+    restart: unless-stopped
+    depends_on:
+      - supabase-db
+    environment:
+      DB_HOST: supabase-db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: postgres
+      DB_SSL: "false"
+      PORT: 4000
+      JWT_SECRET: super-secret-jwt-token-for-local-dev
+      REPLICATION_MODE: RLS
+      SECURE_CHANNELS: "false"
+    ports:
+      - "4000:4000"
+
+  supabase-storage:
+    image: supabase/storage-api:v1.11.13
+    restart: unless-stopped
+    depends_on:
+      - supabase-db
+    environment:
+      ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlhdCI6MTYxMzUzMTk4NSwiZXhwIjoxOTI5MTA3OTg1fQ.ReNhHIoqBWMBCGNNnNFHMFMGNNnNFHMFMGNNnNFHMFM
+      SERVICE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIiwiaWF0IjoxNjEzNTMxOTg1LCJleHAiOjE5MjkxMDc5ODV9.ReNhHIoqBWMBCGNNnNFHMFMGNNnNFHMFMGNNnNFHMFM
+      POSTGREST_URL: http://supabase-db:3000
+      PGRST_JWT_SECRET: super-secret-jwt-token-for-local-dev
+      DATABASE_URL: postgresql://postgres:postgres@supabase-db:5432/postgres
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: local
+      GLOBAL_S3_BUCKET: stub
+    ports:
+      - "5000:5000"
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+
+  # ── Backend ───────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - supabase-db
+    env_file:
+      - .env
+    environment:
+      # Provider config
+      IMAGE_PROVIDER: ${IMAGE_PROVIDER:-gemini}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+
+      # Parallelism
+      IMAGE_GEN_CONCURRENCY: ${IMAGE_GEN_CONCURRENCY:-3}
+
+      # HITL threshold valves
+      HITL_AUTO_APPROVE: ${HITL_AUTO_APPROVE:-0.85}
+      HITL_AUTO_REJECT: ${HITL_AUTO_REJECT:-0.60}
+
+      # Auth (leave empty to disable in dev)
+      PIPELINE_API_KEY: ${PIPELINE_API_KEY:-}
+
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./assets:/app/assets
+      - ./briefs:/app/briefs
+      - pipeline-outputs:/workspace/outputs
+
+  # ── Frontend ──────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      VITE_API_KEY: ${VITE_API_KEY:-}
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  supabase-db-data:
+  supabase-storage-data:
+  pipeline-outputs:
