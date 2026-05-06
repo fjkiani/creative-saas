@@ -238,6 +238,43 @@ async def resume_pipeline_background(run_id: str, decision: str, reviewer_notes:
 
 @public_router.get("/api/health")
 async def health():
+    from backend.db.client import using_local_db, get_supabase_admin
+
+    # ── Supabase DB check ─────────────────────────────────────────────────────
+    supabase_db_ok: bool | str = False
+    if not using_local_db():
+        try:
+            db = get_supabase_admin()
+            db.table("runs").select("id").limit(1).execute()
+            supabase_db_ok = True
+        except Exception as e:
+            supabase_db_ok = str(e)[:120]
+    else:
+        supabase_db_ok = "local_stub"
+
+    # ── Supabase Storage bucket check ─────────────────────────────────────────
+    supabase_storage_ok: bool | str = False
+    if not using_local_db():
+        try:
+            from backend.storage.supabase_storage import BUCKET
+            db = get_supabase_admin()
+            buckets = db.storage.list_buckets()
+            bucket_names = [b.name if hasattr(b, "name") else b.get("name", "") for b in (buckets or [])]
+            supabase_storage_ok = BUCKET in bucket_names
+            if not supabase_storage_ok:
+                supabase_storage_ok = f"bucket '{BUCKET}' not found — run storage_bucket.sql"
+        except Exception as e:
+            supabase_storage_ok = str(e)[:120]
+    else:
+        supabase_storage_ok = "local_stub"
+
+    # ── Effective storage backend (may differ from config if fallback triggered) ──
+    try:
+        from backend.storage.base import get_storage_backend
+        effective_storage = get_storage_backend().name()
+    except Exception as e:
+        effective_storage = f"error: {e}"
+
     return {
         "status": "ok",
         "version": "3.0.0",
@@ -246,6 +283,13 @@ async def health():
             "llm": settings.llm_provider,
             "image": settings.image_provider,
             "storage": settings.storage_backend,
+            "storage_effective": effective_storage,
+        },
+        "checks": {
+            "supabase_configured": settings.supabase_configured,
+            "supabase_db": supabase_db_ok,
+            "supabase_storage_bucket": supabase_storage_ok,
+            "llm_api_key_configured": bool(settings.gemini_api_key or settings.openai_api_key or settings.anthropic_api_key),
         },
     }
 

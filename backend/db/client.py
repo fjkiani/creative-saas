@@ -1,23 +1,21 @@
 """
 Supabase client singleton — with LocalDB fallback when Supabase is not configured.
 
-When SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not set, all DB calls
-use an in-memory dict so the pipeline runs without any external DB dependency.
+When SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not set (or point to localhost),
+all DB calls use an in-memory dict so the pipeline runs without any external DB
+dependency.
+
+IMPORTANT: We read from pydantic Settings (not raw os.getenv) so that the
+decision is made after all env vars have been loaded — not at module import time.
 """
 from __future__ import annotations
-import os
 import json
 import threading
 from datetime import datetime, timezone
-from functools import lru_cache
 from typing import Any
 import structlog
 
 log = structlog.get_logger(__name__)
-
-_SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-_SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
-_USE_LOCAL = not (_SUPABASE_URL and _SUPABASE_KEY and not _SUPABASE_URL.startswith("http://localhost"))
 
 
 # ── Local in-memory DB stub ───────────────────────────────────────────────────
@@ -128,26 +126,60 @@ class LocalDB:
 
 _local_db = LocalDB()
 
+# Module-level cached real client (None until first call)
+_supabase_admin_client = None
+_supabase_client_lock = threading.Lock()
+
 
 # ── Public accessors ──────────────────────────────────────────────────────────
 
+def _is_local() -> bool:
+    """
+    Determine whether to use the LocalDB stub.
+    Reads from pydantic Settings so env vars are fully resolved before the check.
+    """
+    from backend.config import settings
+    return not settings.supabase_configured
+
+
 def get_supabase_admin():
-    """Return Supabase admin client, or LocalDB stub if Supabase is not configured."""
-    if _USE_LOCAL:
+    """
+    Return Supabase admin client (service_role key), or LocalDB stub if
+    Supabase is not configured.
+
+    The real client is created once and cached for the process lifetime.
+    """
+    global _supabase_admin_client
+
+    if _is_local():
         log.debug("db.using_local_stub")
         return _local_db
-    from supabase import create_client
-    from backend.config import settings
-    client = create_client(_SUPABASE_URL, _SUPABASE_KEY)
-    log.info("supabase.admin.initialized", url=_SUPABASE_URL)
-    return client
+
+    with _supabase_client_lock:
+        if _supabase_admin_client is None:
+            from supabase import create_client
+            from backend.config import settings
+            _supabase_admin_client = create_client(
+                settings.supabase_url,
+                settings.supabase_service_key_resolved,
+            )
+            log.info("supabase.admin.initialized", url=settings.supabase_url)
+        return _supabase_admin_client
 
 
 def get_supabase_client():
-    """Return Supabase anon client, or LocalDB stub if Supabase is not configured."""
-    if _USE_LOCAL:
+    """
+    Return Supabase anon client, or LocalDB stub if Supabase is not configured.
+    Used by frontend-facing operations that respect RLS.
+    """
+    if _is_local():
         return _local_db
+
     from supabase import create_client
     from backend.config import settings
-    client = create_client(_SUPABASE_URL, os.getenv("SUPABASE_ANON_KEY", ""))
-    return client
+    return create_client(settings.supabase_url, settings.supabase_anon_key)
+
+
+def using_local_db() -> bool:
+    """Expose local-mode flag for health checks."""
+    return _is_local()

@@ -1,6 +1,19 @@
 # Stage 1: build
 FROM node:20-alpine AS builder
 WORKDIR /app
+
+# Declare build-time args for Vite env vars.
+# These must be ARG (not ENV) so they're available during `npm run build`
+# but not baked into the final nginx image layer.
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ARG VITE_API_URL
+
+# Expose them as ENV so Vite's import.meta.env picks them up at build time
+ENV VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
+ENV VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
+ENV VITE_API_URL=${VITE_API_URL}
+
 COPY package.json ./
 RUN npm install
 COPY . .

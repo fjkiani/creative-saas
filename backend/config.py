@@ -27,12 +27,21 @@ class Settings(BaseSettings):
     stability_api_key: str = Field(default="")
 
     # ── Supabase ─────────────────────────────────────────────
-    supabase_url: str = Field(default="http://localhost:54321")
+    # Default to empty string — empty triggers LocalDB fallback in client.py.
+    # Do NOT default to localhost; that would mask missing config in production.
+    supabase_url: str = Field(default="")
     supabase_anon_key: str = Field(default="")
     supabase_service_role_key: str = Field(default="")
+    # Legacy alias accepted from env
+    supabase_service_key: str = Field(default="")
+
+    @property
+    def supabase_service_key_resolved(self) -> str:
+        """Return service_role_key, falling back to legacy supabase_service_key alias."""
+        return self.supabase_service_role_key or self.supabase_service_key
 
     # ── Storage ──────────────────────────────────────────────
-    storage_backend: str = Field(default="supabase", description="supabase | s3 | azure | dropbox")
+    storage_backend: str = Field(default="supabase", description="supabase | s3 | azure | dropbox | local")
     aws_access_key_id: str = Field(default="")
     aws_secret_access_key: str = Field(default="")
     aws_region: str = Field(default="us-east-1")
@@ -49,6 +58,13 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]
+
+    @property
+    def supabase_configured(self) -> bool:
+        """True when a real Supabase project URL and service key are present."""
+        url = self.supabase_url
+        key = self.supabase_service_key_resolved
+        return bool(url and key and url.startswith("https://"))
 
 
 @lru_cache(maxsize=1)

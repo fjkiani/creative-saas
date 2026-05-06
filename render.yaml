@@ -1,5 +1,6 @@
 # Render deployment blueprint — Creative Automation Pipeline v3
 services:
+  # ── Backend (FastAPI) ────────────────────────────────────────────────────────
   - type: web
     name: creative-pipeline-backend
     runtime: docker
@@ -8,6 +9,7 @@ services:
     plan: starter
     healthCheckPath: /api/health
     envVars:
+      # ── LLM / Image ──────────────────────────────────────────────────────────
       - key: GEMINI_API_KEY
         sync: false
       - key: PIPELINE_API_KEY
@@ -16,13 +18,39 @@ services:
         value: gemini
       - key: LLM_PROVIDER
         value: gemini
+
+      # ── Storage ───────────────────────────────────────────────────────────────
       - key: STORAGE_BACKEND
-        value: local
+        value: supabase
+
+      # ── Supabase ──────────────────────────────────────────────────────────────
+      - key: SUPABASE_URL
+        value: https://cllqahmtyvdcbyyrouxx.supabase.co
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # ── CORS — allow frontend origin ──────────────────────────────────────────
       - key: CORS_ORIGINS
         value: "*"
+
+  # ── Frontend (React/Vite → nginx) ────────────────────────────────────────────
   - type: web
     name: creative-pipeline-frontend
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
     plan: starter
+    buildArgs:
+      # Baked into the Vite bundle at build time
+      - key: VITE_SUPABASE_URL
+        value: https://cllqahmtyvdcbyyrouxx.supabase.co
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+    envVars:
+      # Runtime nginx substitution — points to the backend service
+      - key: BACKEND_URL
+        value: https://creative-pipeline-backend.onrender.com
+      - key: API_KEY
+        sync: false

@@ -39,10 +39,18 @@ class StorageBackend(ABC):
 
 
 def get_storage_backend() -> StorageBackend:
-    """Factory: return the configured storage backend."""
+    """
+    Factory: return the configured storage backend.
+
+    If STORAGE_BACKEND=supabase but Supabase credentials are missing,
+    automatically falls back to LocalStorageBackend with a warning rather
+    than crashing the pipeline.
+    """
     from backend.config import settings
 
-    match settings.storage_backend.lower():
+    backend = settings.storage_backend.lower()
+
+    match backend:
         case "local":
             from backend.storage.local import LocalStorageBackend
             return LocalStorageBackend()
@@ -56,5 +64,20 @@ def get_storage_backend() -> StorageBackend:
             from backend.storage.dropbox_storage import DropboxStorageBackend
             return DropboxStorageBackend()
         case _:  # default: supabase
+            # Guard: if Supabase is not configured, fall back to local with a warning
+            if not settings.supabase_configured:
+                import structlog
+                log = structlog.get_logger(__name__)
+                log.warning(
+                    "storage.supabase_not_configured",
+                    message=(
+                        "STORAGE_BACKEND=supabase but SUPABASE_URL / "
+                        "SUPABASE_SERVICE_ROLE_KEY are not set. "
+                        "Falling back to local storage. "
+                        "Set these env vars to enable Supabase Storage."
+                    ),
+                )
+                from backend.storage.local import LocalStorageBackend
+                return LocalStorageBackend()
             from backend.storage.supabase_storage import SupabaseStorageBackend
             return SupabaseStorageBackend()
