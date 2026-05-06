@@ -9,17 +9,17 @@ RUN npm run build
 # Stage 2: serve
 FROM nginx:alpine
 
-# Install gettext for envsubst
+# gettext provides envsubst
 RUN apk add --no-cache gettext
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# nginx.conf uses ${BACKEND_URL} and ${API_KEY} — substituted at container start
+# nginx template — ${BACKEND_URL} and ${API_KEY} substituted at container start
 COPY nginx.conf /etc/nginx/templates/default.conf.template
+
+# Startup script: substitute env vars then launch nginx
+RUN printf '#!/bin/sh\nenvsubst "\$BACKEND_URL \$API_KEY" < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf\nexec nginx -g "daemon off;"\n' > /docker-entrypoint-custom.sh && chmod +x /docker-entrypoint-custom.sh
 
 EXPOSE 10000
 
-# envsubst replaces ${BACKEND_URL} and ${API_KEY} in the nginx template,
-# writes the result to conf.d/default.conf, then starts nginx
-CMD ["/bin/sh", "-c", \
-     "envsubst '${BACKEND_URL} ${API_KEY}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+CMD ["/docker-entrypoint-custom.sh"]
