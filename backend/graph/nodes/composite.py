@@ -271,7 +271,12 @@ async def composite_node(state: PipelineState) -> PipelineState:
     generated_assets = [GeneratedAsset.model_validate(a) for a in state.get("generated_assets", [])]
 
     # Build message lookup: market_id → headline message
+    # Falls back to empty string — localize node (node 6) re-renders with
+    # LLM-generated headline + tagline after human review approval.
     message_lookup = {m.market_id: (m.message or "") for m in brief.markets}
+
+    # Build product tagline lookup: product_id → tagline (used as fallback headline)
+    tagline_lookup = {p.id: (p.tagline or "") for p in brief.products}
 
     # Build prompt_hash lookup: (product_id, market) → prompt_hash
     hash_lookup = {(a.product_id, a.market): a.prompt_hash for a in generated_assets}
@@ -289,7 +294,11 @@ async def composite_node(state: PipelineState) -> PipelineState:
             errors.append(f"composite load {asset.product_id}×{asset.market}: {e}")
             continue
 
-        headline = message_lookup.get(asset.market, "")
+        # Use market message if set, otherwise fall back to product tagline.
+        # The localize node (node 6) will re-render with the LLM-generated
+        # headline + tagline after human review approval — this ensures
+        # composited images always have text even before localization runs.
+        headline = message_lookup.get(asset.market, "") or tagline_lookup.get(asset.product_id, "")
         logo_path = f"assets/brand/{brief.brand.lower()}_logo.png"
         prompt_hash = hash_lookup.get((asset.product_id, asset.market), "")
         reused = reused_lookup.get((asset.product_id, asset.market), False)
