@@ -72,13 +72,14 @@ def build_pipeline() -> StateGraph:
     graph.add_edge("enrich", "prompt_gen")
     graph.add_edge("prompt_gen", "compliance_pre")
 
-    # Conditional edge: compliance_pre can halt the pipeline on hard errors
+    # compliance_pre always continues to image_gen.
+    # The review_gate node (after composite) scores the compliance report
+    # and routes to approve / PENDING_REVIEW / reject.
     graph.add_conditional_edges(
         "compliance_pre",
         compliance_pre_router,
         {
             "image_gen": "image_gen",
-            "end_with_error": END,
         },
     )
 

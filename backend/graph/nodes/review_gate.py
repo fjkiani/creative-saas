@@ -5,7 +5,7 @@ Implements the "threshold valve" pattern described in the Adobe meeting notes.
 Computes a confidence score from the pre-compliance report and routes:
 
   score >= HITL_AUTO_APPROVE (default 0.85) → auto-approve → localize
-  score <  HITL_AUTO_REJECT  (default 0.40) → auto-reject  → END (REJECTED)
+  score <  HITL_AUTO_REJECT  (default 0.10) → auto-reject  → END (REJECTED)
   otherwise                                 → PENDING_REVIEW (LangGraph interrupt)
 
 When interrupted, the pipeline is paused at this node. The frontend shows a
@@ -16,16 +16,17 @@ ReviewCard with sample assets + compliance score. A human calls:
 which resumes the graph from its MemorySaver checkpoint.
 
 Confidence score formula (heuristic, configurable):
-  score = 1.0 - (0.10 × warning_count) - (0.5 × error_count)
+  score = 1.0 - (0.10 × warning_count) - (0.25 × error_count)
   clamped to [0.0, 1.0]
 
-  Rationale: warnings are advisory (legal language softening), not blockers.
-  3 warnings → score 0.70 → human review band, not auto-reject.
-  Only hard errors (factual/safety violations) should push below auto-reject.
+  Rationale: compliance_pre is an LLM heuristic with frequent false positives.
+  Errors should send the run to human review (PENDING_REVIEW), not auto-reject.
+  The human reviewer sees the actual generated images + compliance report and
+  makes the final call. Auto-reject only triggers on 4+ errors (catastrophic).
 
 Thresholds are configurable via env vars:
   HITL_AUTO_APPROVE  (default: 0.85)
-  HITL_AUTO_REJECT   (default: 0.40)
+  HITL_AUTO_REJECT   (default: 0.10)
 """
 import os
 import structlog
@@ -36,13 +37,25 @@ from backend.graph.nodes._broadcast import broadcast
 log = structlog.get_logger(__name__)
 
 HITL_AUTO_APPROVE = float(os.getenv("HITL_AUTO_APPROVE", "0.85"))
-HITL_AUTO_REJECT = float(os.getenv("HITL_AUTO_REJECT", "0.40"))
+# Auto-reject threshold set very low — pre-compliance is an LLM heuristic.
+# Only auto-reject on truly catastrophic combinations (3+ errors).
+# Everything else goes to human review so the reviewer sees the actual images.
+HITL_AUTO_REJECT = float(os.getenv("HITL_AUTO_REJECT", "0.10"))
 
 # Score deductions per issue type
 # Warnings = advisory (language softening) → small deduction
-# Errors   = factual/safety violations    → large deduction
+# Errors   = flagged by LLM heuristic, may be false positive → medium deduction
+# Scoring table:
+#   0 issues        → 1.00 → auto-approve
+#   1 warning       → 0.90 → auto-approve
+#   2 warnings      → 0.80 → human review
+#   1 error         → 0.75 → human review
+#   2 errors        → 0.50 → human review   ← was auto-reject before
+#   3 errors        → 0.25 → human review
+#   1 error+2 warns → 0.65 → human review
+#   4+ errors       → 0.00 → auto-reject (catastrophic)
 DEDUCTION_WARNING = 0.10
-DEDUCTION_ERROR = 0.50
+DEDUCTION_ERROR = 0.25
 
 
 def compute_confidence_score(pre_compliance: dict | None) -> float:

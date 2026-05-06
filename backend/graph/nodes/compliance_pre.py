@@ -3,8 +3,14 @@ Node 3: compliance_pre
 Pre-generation compliance check on the campaign brief and generated prompts.
 Scans for prohibited words, health claims, superlatives, competitor mentions.
 
-HARD_FAIL (errors) → pipeline halts via conditional edge.
-WARNINGS → logged, pipeline continues.
+ALL results (errors AND warnings) → pipeline continues to image_gen.
+The review_gate node (node 5.5) is the correct decision point —
+it scores the compliance report and either auto-approves, sends to
+human review (PENDING_REVIEW interrupt), or auto-rejects.
+
+Rationale: compliance_pre is an LLM heuristic, not a legal ruling.
+Hard-stopping here prevents the human reviewer from ever seeing the
+generated images. The review_gate interrupt gives a human the final say.
 
 Note: This is an LLM-based heuristic check, not legal advice.
 """
@@ -116,11 +122,24 @@ async def compliance_pre_node(state: PipelineState) -> PipelineState:
 
 def compliance_pre_router(state: PipelineState) -> str:
     """
-    Conditional edge: if pre_compliance has HARD errors, route to END.
-    Otherwise continue to image_gen.
+    Conditional edge: always continue to image_gen.
+
+    Compliance errors and warnings are passed forward in state["pre_compliance"].
+    The review_gate node scores them and routes to:
+      - auto-approve  (score >= 0.85, warnings only, minor issues)
+      - PENDING_REVIEW (score 0.40–0.85, human sees images + compliance report)
+      - auto-reject   (score < 0.40, only on catastrophic error combinations)
+
+    We never hard-stop here because:
+    1. compliance_pre is an LLM heuristic — false positives are common
+    2. The human reviewer needs to see the generated images to make a decision
+    3. Stopping at node 3 leaves the run in a zombie "COMPLETE" state with no
+       terminal status in the DB
     """
     report = state.get("pre_compliance", {})
-    if report and not report.get("passed", True) and report.get("errors"):
-        log.warning("compliance_pre.hard_fail", errors=report["errors"])
-        return "end_with_error"
+    error_count = len(report.get("errors", [])) if report else 0
+    warning_count = len(report.get("warnings", [])) if report else 0
+    log.info("compliance_pre.routing",
+             errors=error_count, warnings=warning_count,
+             destination="image_gen (review_gate will score and decide)")
     return "image_gen"
