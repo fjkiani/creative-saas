@@ -129,9 +129,15 @@ async def run_pipeline_background(run_id: str, state: PipelineState):
 
     Uses run_id as the LangGraph thread_id for MemorySaver checkpointing,
     enabling interrupt/resume for the HITL review_gate node.
+
+    IMPORTANT: LangGraph raises GraphInterrupt (a subclass of Exception) when
+    interrupt() is called inside a node. We MUST catch it before the generic
+    Exception handler, otherwise the run gets marked FAILED instead of
+    PENDING_REVIEW.
     """
     from backend.db.client import get_supabase_admin
     from backend.graph.pipeline import pipeline
+    from langgraph.errors import GraphInterrupt
 
     db = get_supabase_admin()
     log.info("pipeline.start", run_id=run_id)
@@ -144,12 +150,6 @@ async def run_pipeline_background(run_id: str, state: PipelineState):
         # thread_id = run_id enables MemorySaver to checkpoint per-run
         config = {"configurable": {"thread_id": run_id}}
         final_state = await pipeline.ainvoke(state, config=config)
-
-        # If interrupted (PENDING_REVIEW), ainvoke returns early — don't mark complete yet
-        review_decision = final_state.get("review_decision")
-        if review_decision is None and final_state.get("current_node") == "review_gate":
-            log.info("pipeline.interrupted_for_review", run_id=run_id)
-            return  # DB already set to PENDING_REVIEW by review_gate node
 
         # Save run report
         await save_run_report(final_state)
@@ -169,6 +169,13 @@ async def run_pipeline_background(run_id: str, state: PipelineState):
 
         log.info("pipeline.complete", run_id=run_id, status=status,
                  assets=len(final_state.get("composited_assets", [])))
+
+    except GraphInterrupt:
+        # review_gate called interrupt() — pipeline is paused awaiting human decision.
+        # The review_gate node already set status=PENDING_REVIEW in the DB.
+        # The MemorySaver checkpoint is intact — resume via POST /api/runs/{id}/review.
+        log.info("pipeline.pending_review", run_id=run_id,
+                 message="Graph interrupted for human review — awaiting POST /review")
 
     except Exception as e:
         log.error("pipeline.crashed", run_id=run_id, error=str(e))
@@ -190,6 +197,7 @@ async def resume_pipeline_background(run_id: str, decision: str, reviewer_notes:
     from backend.db.client import get_supabase_admin
     from backend.graph.pipeline import pipeline
     from langgraph.types import Command
+    from langgraph.errors import GraphInterrupt
 
     db = get_supabase_admin()
     log.info("pipeline.resume", run_id=run_id, decision=decision)
@@ -221,6 +229,10 @@ async def resume_pipeline_background(run_id: str, decision: str, reviewer_notes:
         }).eq("id", run_id).execute()
 
         log.info("pipeline.resume.complete", run_id=run_id, status=status)
+
+    except GraphInterrupt:
+        # Shouldn't happen on resume, but handle gracefully
+        log.warning("pipeline.resume.unexpected_interrupt", run_id=run_id)
 
     except Exception as e:
         log.error("pipeline.resume.crashed", run_id=run_id, error=str(e))
