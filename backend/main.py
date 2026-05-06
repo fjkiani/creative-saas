@@ -27,6 +27,7 @@ import yaml
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -430,6 +431,14 @@ async def get_example_briefs():
         with open(brief_file) as f:
             briefs[brief_file.stem] = yaml.safe_load(f)
     return briefs
+
+
+# ── Static file serving (generated assets) ───────────────────────────────────
+
+# Ensure outputs directory exists and mount it for direct image serving
+_OUTPUTS_DIR = Path(os.getenv("OUTPUTS_DIR", "/app/outputs"))
+_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=str(_OUTPUTS_DIR)), name="outputs")
 
 
 # ── Mount routers ─────────────────────────────────────────────────────────────
