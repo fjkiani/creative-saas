@@ -1,4 +1,10 @@
+
 # Creative Automation Pipeline v3
+
+Client: A global consumer goods company launching hundreds of localized social ad
+campaigns monthly.   
+Objective: Design a creative automation pipeline that enables the creative team to
+generate variations for campaign assets.
 
 A production-grade GenAI creative automation pipeline that turns a campaign brief into hundreds of localized, multi-ratio, multi-platform ad creatives — with human-in-the-loop review, parallel image generation, and one-click Render deployment.
 
