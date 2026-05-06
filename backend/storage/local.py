@@ -2,10 +2,12 @@
 Local filesystem storage backend — for development and demo runs.
 No cloud credentials required.
 
-Files are saved under outputs/<path> relative to the project root.
-Public URLs are file:// paths (or served by a static file server in dev).
+Files are saved under /app/outputs/<path> (configurable via OUTPUTS_DIR env var).
+Public URLs are returned as /outputs/<path> — a relative URL served by the
+FastAPI StaticFiles mount at /outputs, proxied through nginx on the frontend.
 """
 import asyncio
+import os
 import structlog
 from pathlib import Path
 
@@ -13,8 +15,8 @@ from backend.storage.base import StorageBackend
 
 log = structlog.get_logger(__name__)
 
-# Root output directory — relative to project root
-OUTPUT_ROOT = Path("outputs")
+# Root output directory — configurable, defaults to /app/outputs in production
+OUTPUT_ROOT = Path(os.getenv("OUTPUTS_DIR", "/app/outputs"))
 
 
 class LocalStorageBackend(StorageBackend):
@@ -35,7 +37,8 @@ class LocalStorageBackend(StorageBackend):
         await loop.run_in_executor(None, full_path.write_bytes, data)
 
         log.info("local_storage.save", path=path, bytes=len(data))
-        return str(full_path.resolve())
+        # Return a browser-accessible relative URL served by the /outputs StaticFiles mount
+        return f"/outputs/{path}"
 
     async def load(self, path: str) -> bytes:
         full_path = self._root / path
@@ -46,4 +49,4 @@ class LocalStorageBackend(StorageBackend):
         return (self._root / path).exists()
 
     def public_url(self, path: str) -> str:
-        return str((self._root / path).resolve())
+        return f"/outputs/{path}"
