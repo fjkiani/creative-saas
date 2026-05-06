@@ -5,7 +5,7 @@ Implements the "threshold valve" pattern described in the Adobe meeting notes.
 Computes a confidence score from the pre-compliance report and routes:
 
   score >= HITL_AUTO_APPROVE (default 0.85) → auto-approve → localize
-  score <  HITL_AUTO_REJECT  (default 0.60) → auto-reject  → END (REJECTED)
+  score <  HITL_AUTO_REJECT  (default 0.40) → auto-reject  → END (REJECTED)
   otherwise                                 → PENDING_REVIEW (LangGraph interrupt)
 
 When interrupted, the pipeline is paused at this node. The frontend shows a
@@ -16,12 +16,16 @@ ReviewCard with sample assets + compliance score. A human calls:
 which resumes the graph from its MemorySaver checkpoint.
 
 Confidence score formula (heuristic, configurable):
-  score = 1.0 - (0.15 × warning_count) - (0.5 × error_count)
+  score = 1.0 - (0.10 × warning_count) - (0.5 × error_count)
   clamped to [0.0, 1.0]
+
+  Rationale: warnings are advisory (legal language softening), not blockers.
+  3 warnings → score 0.70 → human review band, not auto-reject.
+  Only hard errors (factual/safety violations) should push below auto-reject.
 
 Thresholds are configurable via env vars:
   HITL_AUTO_APPROVE  (default: 0.85)
-  HITL_AUTO_REJECT   (default: 0.60)
+  HITL_AUTO_REJECT   (default: 0.40)
 """
 import os
 import structlog
@@ -32,10 +36,12 @@ from backend.graph.nodes._broadcast import broadcast
 log = structlog.get_logger(__name__)
 
 HITL_AUTO_APPROVE = float(os.getenv("HITL_AUTO_APPROVE", "0.85"))
-HITL_AUTO_REJECT = float(os.getenv("HITL_AUTO_REJECT", "0.60"))
+HITL_AUTO_REJECT = float(os.getenv("HITL_AUTO_REJECT", "0.40"))
 
 # Score deductions per issue type
-DEDUCTION_WARNING = 0.15
+# Warnings = advisory (language softening) → small deduction
+# Errors   = factual/safety violations    → large deduction
+DEDUCTION_WARNING = 0.10
 DEDUCTION_ERROR = 0.50
 
 
