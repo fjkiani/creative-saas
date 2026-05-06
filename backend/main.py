@@ -408,7 +408,7 @@ async def list_runs():
 async def get_run(run_id: str):
     from backend.db.client import get_supabase_admin
     db = get_supabase_admin()
-    result = db.table("runs").select("*, run_events(*), assets(*)").eq("id", run_id).single().execute()
+    result = db.table("runs").select("*").eq("id", run_id).single().execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Run not found")
     return result.data
