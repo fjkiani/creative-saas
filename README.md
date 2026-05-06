@@ -1,5 +1,7 @@
 
-https://cap.link/q3vzsxrxr484qp5
+Demo: https://cap.link/q3vzsxrxr484qp5
+
+Deployed link: https://creative-pipeline-frontend.onrender.com/
 
 # Creative Automation Pipeline v3
 
