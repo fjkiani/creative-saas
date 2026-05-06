@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 
 interface Asset {
   product_id: string
@@ -25,10 +25,53 @@ const RATIO_ASPECT: Record<string, string> = {
   '16:9': '16 / 9',
 }
 
+/**
+ * Download a file from any origin (including Supabase Storage CDN).
+ *
+ * The HTML `download` attribute only works for same-origin URLs.
+ * For cross-origin URLs (e.g. https://xxx.supabase.co/...) the browser
+ * ignores `download` and just navigates to the URL instead.
+ *
+ * Fix: fetch the bytes, create a local blob URL, click that — always works.
+ */
+async function downloadAsset(url: string, filename: string): Promise<void> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const blob = await res.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objectUrl
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    // Release the object URL after a short delay
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 5000)
+  } catch (err) {
+    // Fallback: open in new tab so user can save manually
+    console.warn('Download failed, opening in new tab:', err)
+    window.open(url, '_blank', 'noreferrer')
+  }
+}
+
+function assetFilename(asset: Asset): string {
+  const ratio = asset.aspect_ratio.replace(':', 'x')
+  return `${asset.product_id}_${asset.market}_${ratio}_${asset.language}.png`
+}
+
 export function AssetGrid({ assets }: Props) {
   const [selectedProduct, setSelectedProduct] = useState<string | null>(null)
   const [selectedMarket, setSelectedMarket] = useState<string | null>(null)
   const [lightbox, setLightbox] = useState<Asset | null>(null)
+  const [downloading, setDownloading] = useState<string | null>(null)
+
+  const handleDownload = useCallback(async (asset: Asset) => {
+    const key = `${asset.product_id}-${asset.market}-${asset.aspect_ratio}`
+    setDownloading(key)
+    await downloadAsset(asset.storage_url, assetFilename(asset))
+    setDownloading(null)
+  }, [])
 
   if (assets.length === 0) {
     return (
@@ -103,27 +146,45 @@ export function AssetGrid({ assets }: Props) {
               <div style={styles.ratioRow}>
                 {ratios.map(ratio => {
                   const asset = productAssets.find(a => a.aspect_ratio === ratio)
+                  const dlKey = asset ? `${asset.product_id}-${asset.market}-${asset.aspect_ratio}` : null
+                  const isDownloading = dlKey !== null && downloading === dlKey
+
                   return (
                     <div key={ratio} style={styles.ratioCell}>
                       <div style={styles.ratioLabel}>{RATIO_LABELS[ratio] || ratio}</div>
                       {asset ? (
-                        <div
-                          style={{
-                            ...styles.imageWrapper,
-                            aspectRatio: RATIO_ASPECT[ratio] || '1/1',
-                            cursor: 'pointer',
-                          }}
-                          onClick={() => setLightbox(asset)}
-                        >
-                          <img
-                            src={asset.storage_url}
-                            alt={`${product} ${market} ${ratio}`}
-                            style={styles.image}
-                            loading="lazy"
-                          />
-                          <div style={styles.imageOverlay}>
-                            <span style={styles.expandIcon}>⤢</span>
+                        <div style={{ position: 'relative' }}>
+                          <div
+                            style={{
+                              ...styles.imageWrapper,
+                              aspectRatio: RATIO_ASPECT[ratio] || '1/1',
+                              cursor: 'pointer',
+                            }}
+                            onClick={() => setLightbox(asset)}
+                          >
+                            <img
+                              src={asset.storage_url}
+                              alt={`${product} ${market} ${ratio}`}
+                              style={styles.image}
+                              loading="lazy"
+                            />
+                            <div style={styles.imageOverlay}>
+                              <span style={styles.expandIcon}>⤢</span>
+                            </div>
                           </div>
+                          {/* Per-card download button */}
+                          <button
+                            style={{
+                              ...styles.cardDownloadBtn,
+                              opacity: isDownloading ? 0.5 : 1,
+                              cursor: isDownloading ? 'wait' : 'pointer',
+                            }}
+                            onClick={() => handleDownload(asset)}
+                            disabled={isDownloading}
+                            title={`Download ${ratio}`}
+                          >
+                            {isDownloading ? '...' : '↓'}
+                          </button>
                         </div>
                       ) : (
                         <div style={{
@@ -157,15 +218,15 @@ export function AssetGrid({ assets }: Props) {
               <span>·</span>
               <span>{lightbox.language.toUpperCase()}</span>
             </div>
-            <a
-              href={lightbox.storage_url}
-              download
+            {/* Cross-origin safe download — fetch blob then trigger save */}
+            <button
               style={styles.downloadBtn}
-              target="_blank"
-              rel="noreferrer"
+              onClick={() => handleDownload(lightbox)}
             >
-              Download
-            </a>
+              {downloading === `${lightbox.product_id}-${lightbox.market}-${lightbox.aspect_ratio}`
+                ? 'Downloading...'
+                : 'Download'}
+            </button>
           </div>
         </div>
       )}
@@ -222,6 +283,22 @@ const styles: Record<string, React.CSSProperties> = {
     transition: 'background 0.2s',
   },
   expandIcon: { fontSize: 20, color: '#fff', opacity: 0 },
+  cardDownloadBtn: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    background: 'rgba(0,0,0,0.65)',
+    border: '1px solid rgba(255,255,255,0.15)',
+    color: '#fff',
+    fontSize: 13,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    lineHeight: 1,
+  } as React.CSSProperties,
   placeholder: {
     background: '#111', borderRadius: 8, border: '1px dashed #2a2a2a',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -250,7 +327,7 @@ const styles: Record<string, React.CSSProperties> = {
   downloadBtn: {
     display: 'inline-block', padding: '8px 20px',
     background: '#1d4ed8', color: '#fff', borderRadius: 8,
-    textDecoration: 'none', fontSize: 13, fontWeight: 500,
-    textAlign: 'center',
+    border: 'none', fontSize: 13, fontWeight: 500,
+    textAlign: 'center', cursor: 'pointer', width: '100%',
   },
 }

@@ -1,16 +1,54 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 import { PipelineTracker } from '../components/PipelineTracker'
 import { AssetGrid } from '../components/AssetGrid'
 import { CompliancePanel } from '../components/CompliancePanel'
 import { ReviewCard } from '../components/ReviewCard'
+import type { AssetRow } from '../hooks/usePipelineRun'
+
+/**
+ * Download all assets as individual files in sequence.
+ * We don't bundle a ZIP library to keep the bundle small — browsers handle
+ * multiple sequential downloads fine (one per asset, named clearly).
+ * If you want a real ZIP, add jszip: `npm install jszip` and swap this out.
+ */
+async function downloadAllAssets(assets: AssetRow[], runId: string): Promise<void> {
+  for (const asset of assets) {
+    try {
+      const res = await fetch(asset.storage_url)
+      if (!res.ok) continue
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const ratio = asset.aspect_ratio.replace(':', 'x')
+      a.href = objectUrl
+      a.download = `${runId.slice(0, 8)}_${asset.product_id}_${asset.market}_${ratio}_${asset.language}.png`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 5000)
+      // Small delay between downloads so browser doesn't block them
+      await new Promise(r => setTimeout(r, 300))
+    } catch {
+      // Skip failed assets silently
+    }
+  }
+}
 
 export function RunDetail() {
   const { runId } = useParams<{ runId: string }>()
   const { run, nodes, assets, loading, error, refetch } = usePipelineRun(runId ?? null)
   const [showReport, setShowReport] = useState(false)
   const [reviewDone, setReviewDone] = useState(false)
+  const [downloadingAll, setDownloadingAll] = useState(false)
+
+  const handleDownloadAll = useCallback(async () => {
+    if (!runId || assets.length === 0) return
+    setDownloadingAll(true)
+    await downloadAllAssets(assets as AssetRow[], runId)
+    setDownloadingAll(false)
+  }, [runId, assets])
 
   if (loading) {
     return (
@@ -99,10 +137,18 @@ export function RunDetail() {
           </div>
           <div style={styles.campaignActions}>
             {run.status === 'COMPLETE' && assets.length > 0 && (
-              <button style={styles.actionBtn} onClick={() => {
-                alert('In production: downloads a ZIP of all assets organized by product/ratio')
-              }}>
-                Download All Assets
+              <button
+                style={{
+                  ...styles.actionBtn,
+                  opacity: downloadingAll ? 0.6 : 1,
+                  cursor: downloadingAll ? 'wait' : 'pointer',
+                }}
+                onClick={handleDownloadAll}
+                disabled={downloadingAll}
+              >
+                {downloadingAll
+                  ? `Downloading ${assets.length} assets...`
+                  : `Download All (${assets.length})`}
               </button>
             )}
           </div>

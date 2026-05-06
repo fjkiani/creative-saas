@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { supabase } from '../lib/supabase'
 
 export type NodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
 
@@ -29,6 +30,20 @@ export interface RunData {
   error_message: string | null
   created_at: string
   completed_at: string | null
+  review_score?: number | null
+}
+
+export interface AssetRow {
+  id: string
+  run_id: string
+  product_id: string
+  market: string
+  aspect_ratio: string
+  language: string
+  storage_url: string
+  storage_path: string
+  reused: boolean
+  compliance_passed: boolean | null
 }
 
 // Ordered pipeline nodes with display labels
@@ -62,7 +77,6 @@ function applyEventsToNodes(
         event.status === 'COMPLETED' ? 'completed' :
         event.status === 'FAILED'    ? 'failed'    :
         event.status === 'SKIPPED'   ? 'skipped'   : n.status
-      // Only update if the new status is "later" in the lifecycle
       const order: Record<NodeStatus, number> = {
         pending: 0, running: 1, completed: 2, failed: 2, skipped: 2
       }
@@ -75,21 +89,59 @@ function applyEventsToNodes(
   return updated
 }
 
+/**
+ * Merge a new asset row into the existing asset list.
+ * Deduplicates by id; updates in place if already present.
+ */
+function mergeAsset(prev: AssetRow[], incoming: AssetRow): AssetRow[] {
+  const idx = prev.findIndex(a => a.id === incoming.id)
+  if (idx === -1) return [...prev, incoming]
+  const next = [...prev]
+  next[idx] = incoming
+  return next
+}
+
 export function usePipelineRun(runId: string | null) {
   const [run, setRun] = useState<RunData | null>(null)
   const [nodes, setNodes] = useState<NodeState[]>(initNodeStates())
-  const [assets, setAssets] = useState<Record<string, unknown>[]>([])
+  // assets: live rows from Supabase `assets` table (primary source)
+  // falls back to run_report.asset_summary when Supabase Realtime is unavailable
+  const [assets, setAssets] = useState<AssetRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // Track seen event timestamps to avoid re-applying duplicates
   const seenEventsRef = useRef<Set<string>>(new Set())
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Track Supabase Realtime channel so we can unsubscribe on cleanup
+  const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current !== null) {
       clearInterval(pollingRef.current)
       pollingRef.current = null
+    }
+  }, [])
+
+  const stopRealtime = useCallback(() => {
+    if (realtimeChannelRef.current) {
+      supabase.removeChannel(realtimeChannelRef.current)
+      realtimeChannelRef.current = null
+    }
+  }, [])
+
+  // ── Fetch assets from Supabase `assets` table ─────────────────────────────
+  const fetchAssets = useCallback(async (id: string) => {
+    try {
+      const { data, error: err } = await supabase
+        .from('assets')
+        .select('*')
+        .eq('run_id', id)
+        .order('created_at')
+      if (!err && data) {
+        setAssets(data as AssetRow[])
+      }
+    } catch {
+      // Non-fatal — fall back to run_report extraction below
     }
   }, [])
 
@@ -116,11 +168,19 @@ export function usePipelineRun(runId: string | null) {
         }
       }
 
-      // Extract assets from run_report
-      if (runData.run_report?.asset_summary) {
-        const summary = runData.run_report.asset_summary as Record<string, unknown>
-        setAssets((summary.assets as Record<string, unknown>[]) || [])
-      }
+      // Primary: pull from Supabase assets table
+      await fetchAssets(id)
+
+      // Fallback: if assets table is empty, extract from run_report
+      setAssets(prev => {
+        if (prev.length > 0) return prev  // already have live rows
+        if (runData.run_report?.asset_summary) {
+          const summary = runData.run_report.asset_summary as Record<string, unknown>
+          const reportAssets = (summary.assets as AssetRow[]) || []
+          return reportAssets
+        }
+        return prev
+      })
 
       // Stop polling once terminal
       if (TERMINAL_STATUSES.has(runData.status)) {
@@ -129,7 +189,43 @@ export function usePipelineRun(runId: string | null) {
     } catch (e) {
       setError(String(e))
     }
-  }, [stopPolling])
+  }, [stopPolling, fetchAssets])
+
+  // ── Subscribe to Supabase Realtime for live asset inserts ─────────────────
+  const startRealtime = useCallback((id: string) => {
+    stopRealtime()
+
+    const channel = supabase
+      .channel(`assets:run_id=eq.${id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'assets',
+          filter: `run_id=eq.${id}`,
+        },
+        (payload) => {
+          // New asset row arrived — merge into state immediately
+          setAssets(prev => mergeAsset(prev, payload.new as AssetRow))
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'assets',
+          filter: `run_id=eq.${id}`,
+        },
+        (payload) => {
+          setAssets(prev => mergeAsset(prev, payload.new as AssetRow))
+        }
+      )
+      .subscribe()
+
+    realtimeChannelRef.current = channel
+  }, [stopRealtime])
 
   useEffect(() => {
     if (!runId) return
@@ -142,19 +238,29 @@ export function usePipelineRun(runId: string | null) {
     setError(null)
     seenEventsRef.current = new Set()
     stopPolling()
+    stopRealtime()
+
+    // Subscribe to live asset inserts via Supabase Realtime
+    startRealtime(runId)
 
     // Initial fetch
     fetchAndApply(runId).finally(() => setLoading(false))
 
-    // Start polling
+    // Polling fallback (catches run status + events; Realtime handles assets)
     pollingRef.current = setInterval(() => {
       fetchAndApply(runId)
     }, POLL_INTERVAL_MS)
 
     return () => {
       stopPolling()
+      stopRealtime()
     }
-  }, [runId, fetchAndApply, stopPolling])
+  }, [runId, fetchAndApply, stopPolling, stopRealtime, startRealtime])
 
-  return { run, nodes, assets, loading, error }
+  // Expose refetch for manual refresh (used by ReviewCard after decision)
+  const refetch = useCallback(() => {
+    if (runId) fetchAndApply(runId)
+  }, [runId, fetchAndApply])
+
+  return { run, nodes, assets, loading, error, refetch }
 }
