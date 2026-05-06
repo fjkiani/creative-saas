@@ -26,8 +26,10 @@ services:
       # ── Supabase ──────────────────────────────────────────────────────────────
       - key: SUPABASE_URL
         value: https://cllqahmtyvdcbyyrouxx.supabase.co
+      # anon key is public-safe (browser-facing JWT, no elevated privileges)
       - key: SUPABASE_ANON_KEY
-        sync: false
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE
+      # service_role key — set this manually in Render dashboard, never commit
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
 
@@ -43,11 +45,11 @@ services:
     dockerContext: ./frontend
     plan: starter
     buildArgs:
-      # Baked into the Vite bundle at build time
+      # Baked into the Vite bundle at build time (anon key is public-safe)
       - key: VITE_SUPABASE_URL
         value: https://cllqahmtyvdcbyyrouxx.supabase.co
       - key: VITE_SUPABASE_ANON_KEY
-        sync: false
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE
     envVars:
       # Runtime nginx substitution — points to the backend service
       - key: BACKEND_URL
