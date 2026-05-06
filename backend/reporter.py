@@ -19,6 +19,15 @@ from backend.graph.state import PipelineState
 log = structlog.get_logger(__name__)
 
 
+def _get_storage_name() -> str:
+    """Return the effective storage backend name for the run report."""
+    try:
+        from backend.storage.base import get_storage_backend
+        return get_storage_backend().name()
+    except Exception:
+        return "unknown"
+
+
 def _fetch_assets_from_db(run_id: str) -> list[dict]:
     """
     Pull the final asset rows from Supabase for this run.
@@ -62,7 +71,7 @@ def build_run_report(state: PipelineState, db_assets: list[dict] | None = None) 
         "providers": {
             "llm": state.get("provider_llm", "unknown"),
             "image": state.get("provider_image", "unknown"),
-            "storage": state.get("storage_backend", "unknown"),
+            "storage": state.get("storage_backend", _get_storage_name()),
         },
         "brief_summary": {
             "campaign_id": brief.get("campaign_id"),
