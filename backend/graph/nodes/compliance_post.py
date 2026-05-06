@@ -7,15 +7,19 @@ Three checks:
 2. Brand color adherence — dominant color extraction (k-means, k=5) vs. brand palette
 3. Overlay text scan — prohibited word check on rendered text strings
 
-v3 fix: compliance_passed is now written back to each CompositedAsset individually,
-so the run report and frontend can show per-asset compliance status.
+After checks, writes compliance_passed back to:
+  - Each CompositedAsset in state (for run_report)
+  - Each row in the Supabase `assets` table (for direct DB queries)
 """
 import io
 import structlog
 import numpy as np
 from PIL import Image
 from pathlib import Path
-from backend.graph.state import PipelineState, CampaignBrief, ComplianceReport, ComplianceIssue, CompositedAsset
+from backend.graph.state import (
+    PipelineState, CampaignBrief, ComplianceReport,
+    ComplianceIssue, CompositedAsset,
+)
 from backend.storage.base import get_storage_backend
 from backend.graph.nodes._broadcast import broadcast
 from backend.graph.nodes.compliance_pre import load_prohibited_words
@@ -45,10 +49,7 @@ def _color_distance(c1: tuple, c2: tuple) -> float:
 
 
 def check_logo_presence(img_array: np.ndarray, logo_path: str) -> bool:
-    """
-    Template matching to verify logo is present in the composited image.
-    Returns True if logo is detected above threshold.
-    """
+    """Template matching to verify logo is present in the composited image."""
     try:
         import cv2
         logo_file = Path(logo_path)
@@ -58,7 +59,6 @@ def check_logo_presence(img_array: np.ndarray, logo_path: str) -> bool:
         logo = cv2.imread(str(logo_file), cv2.IMREAD_GRAYSCALE)
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
 
-        # Multi-scale template matching
         for scale in [1.0, 0.8, 0.6, 0.4]:
             h, w = logo.shape
             scaled_logo = cv2.resize(logo, (int(w * scale), int(h * scale)))
@@ -75,14 +75,10 @@ def check_logo_presence(img_array: np.ndarray, logo_path: str) -> bool:
 
 
 def check_brand_colors(img_array: np.ndarray, palette: list[tuple]) -> bool:
-    """
-    Extract dominant colors via k-means and check if any brand color is in top 5.
-    Returns True if brand color adherence passes.
-    """
+    """Extract dominant colors via k-means and check if any brand color is in top 5."""
     try:
         from sklearn.cluster import KMeans
         pixels = img_array.reshape(-1, 3).astype(np.float32)
-        # Sample for speed
         if len(pixels) > 10000:
             idx = np.random.choice(len(pixels), 10000, replace=False)
             pixels = pixels[idx]
@@ -102,10 +98,13 @@ def check_brand_colors(img_array: np.ndarray, palette: list[tuple]) -> bool:
         return True  # Fail open
 
 
-def check_text_prohibited(localized_copies: list[dict], prohibited_words: list[str]) -> list[tuple[str, str, str]]:
+def check_text_prohibited(
+    localized_copies: list[dict],
+    prohibited_words: list[str],
+) -> list[tuple[str, str, str]]:
     """
     Scan all rendered text strings for prohibited words.
-    Returns list of (product_id, market, description) tuples for attribution.
+    Returns list of (product_id, market, description) tuples.
     """
     flagged = []
     for copy in localized_copies:
@@ -119,6 +118,37 @@ def check_text_prohibited(localized_copies: list[dict], prohibited_words: list[s
                         f"'{word}' found in {field}: '{copy.get(field)}'",
                     ))
     return flagged
+
+
+def _write_compliance_to_db(
+    run_id: str,
+    product_id: str,
+    market: str,
+    aspect_ratio: str,
+    compliance_passed: bool,
+) -> None:
+    """
+    UPDATE the assets table row with compliance_passed result.
+    Non-blocking — any error is logged and swallowed.
+    """
+    try:
+        from backend.db.client import get_supabase_admin, using_local_db
+        if using_local_db():
+            return
+
+        db = get_supabase_admin()
+        db.table("assets").update(
+            {"compliance_passed": compliance_passed}
+        ).eq("run_id", run_id).eq("product_id", product_id).eq(
+            "market", market
+        ).eq("aspect_ratio", aspect_ratio).execute()
+
+        log.debug("assets.compliance_written",
+                  product=product_id, market=market,
+                  ratio=aspect_ratio, passed=compliance_passed)
+    except Exception as e:
+        log.warning("assets.compliance_write_failed",
+                    product=product_id, market=market, error=str(e))
 
 
 async def compliance_post_node(state: PipelineState) -> PipelineState:
@@ -139,7 +169,7 @@ async def compliance_post_node(state: PipelineState) -> PipelineState:
     warnings: list[str] = []
     errors: list[str] = []
 
-    # Track per-asset error keys: set of (product_id, market) with ERROR severity
+    # Track which (product_id, market) pairs have ERROR-severity issues
     error_asset_keys: set[tuple[str, str]] = set()
 
     # ── Check 1: Text prohibited words ───────────────────────────────────────
@@ -157,7 +187,6 @@ async def compliance_post_node(state: PipelineState) -> PipelineState:
 
     # ── Check 2: Logo presence + brand colors on sample images ───────────────
     composited_assets = state.get("composited_assets", [])
-    # Sample: check first image per product × market (not all ratios — expensive)
     checked_keys: set[str] = set()
 
     for asset_dict in composited_assets:
@@ -172,7 +201,6 @@ async def compliance_post_node(state: PipelineState) -> PipelineState:
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             img_array = np.array(img)
 
-            # Logo check
             logo_found = check_logo_presence(img_array, logo_path)
             if not logo_found:
                 issues.append(ComplianceIssue(
@@ -184,13 +212,12 @@ async def compliance_post_node(state: PipelineState) -> PipelineState:
                 ))
                 warnings.append(f"Logo not detected: {asset.product_id} × {asset.market}")
 
-            # Brand color check
             colors_ok = check_brand_colors(img_array, palette)
             if not colors_ok:
                 issues.append(ComplianceIssue(
                     severity="WARNING",
                     category="BRAND",
-                    description=f"No brand colors detected in dominant palette for {asset.product_id} × {asset.market}",
+                    description=f"No brand colors detected for {asset.product_id} × {asset.market}",
                     product_id=asset.product_id,
                     market=asset.market,
                 ))
@@ -203,15 +230,23 @@ async def compliance_post_node(state: PipelineState) -> PipelineState:
     passed = len(errors) == 0
     report = ComplianceReport(passed=passed, issues=issues, warnings=warnings, errors=errors)
 
-    # ── v3 fix: Write compliance_passed back to each CompositedAsset ─────────
-    # An asset fails if its (product_id, market) has any ERROR-severity issue.
-    # Warnings do not fail individual assets.
+    # ── Write compliance_passed back to each asset (state + DB) ──────────────
     updated_assets: list[dict] = []
     for asset_dict in composited_assets:
         asset = CompositedAsset.model_validate(asset_dict)
         asset_key = (asset.product_id, asset.market)
-        asset.compliance_passed = asset_key not in error_asset_keys
+        compliance_passed = asset_key not in error_asset_keys
+        asset.compliance_passed = compliance_passed
         updated_assets.append(asset.model_dump())
+
+        # Write to Supabase assets table
+        _write_compliance_to_db(
+            run_id=run_id,
+            product_id=asset.product_id,
+            market=asset.market,
+            aspect_ratio=asset.aspect_ratio,
+            compliance_passed=compliance_passed,
+        )
 
     log.info("node.compliance_post.complete", run_id=run_id, passed=passed,
              warnings=len(warnings), errors=len(errors),
@@ -225,7 +260,7 @@ async def compliance_post_node(state: PipelineState) -> PipelineState:
         "assets_compliance_written": len(updated_assets),
     })
 
-    # Update run status in DB
+    # Mark run COMPLETE in DB
     try:
         from backend.db.client import get_supabase_admin
         db = get_supabase_admin()

@@ -5,7 +5,8 @@ For each generated asset × aspect ratio:
   2. Apply semi-transparent gradient overlay (bottom 40%) for text legibility
   3. Composite brand logo at configured anchor position
   4. Render campaign message headline with brand font/color
-  5. Upload composited image to storage
+  5. Upload composited image to Supabase Storage
+  6. INSERT row into Supabase `assets` table (fires Realtime → frontend updates live)
 
 Compositing is done with Pillow — no external dependencies.
 """
@@ -81,7 +82,6 @@ def composite_logo(img: Image.Image, logo_path: str, position: str, padding: int
         return img
 
     logo = Image.open(logo_file).convert("RGBA")
-    # Scale logo to ~12% of image width
     max_logo_w = int(img.width * 0.12)
     ratio = max_logo_w / logo.width
     logo = logo.resize((max_logo_w, int(logo.height * ratio)), Image.LANCZOS)
@@ -108,7 +108,6 @@ def render_text(img: Image.Image, headline: str, tagline: str | None,
     draw = ImageDraw.Draw(img)
     w, h = img.size
 
-    # Try to load a nice font, fall back to default
     font_headline = _load_font(font_size_h)
     font_tagline = _load_font(font_size_t)
 
@@ -117,11 +116,9 @@ def render_text(img: Image.Image, headline: str, tagline: str | None,
     b = int(color.lstrip("#")[4:6], 16)
     text_color = (r, g, b)
 
-    # Position text in bottom 35% of image
     text_area_top = int(h * 0.65)
     padding = int(w * 0.06)
 
-    # Wrap headline if too long
     headline_lines = _wrap_text(headline, font_headline, w - 2 * padding)
     y = text_area_top + int(h * 0.05)
 
@@ -178,6 +175,89 @@ def _wrap_text(text: str, font, max_width: int) -> list[str]:
     return lines or [text]
 
 
+def _upsert_asset_row(
+    run_id: str,
+    product_id: str,
+    market: str,
+    aspect_ratio: str,
+    language: str,
+    storage_url: str,
+    storage_path: str,
+    prompt_hash: str,
+    reused: bool,
+) -> None:
+    """
+    INSERT or UPDATE a row in the Supabase `assets` table.
+
+    Strategy:
+    1. Try upsert with on_conflict (requires uq_asset_per_run constraint).
+    2. If that fails with 42P10 (constraint missing), fall back to:
+       - UPDATE existing row if it exists
+       - INSERT new row if it doesn't
+    This makes the code safe whether or not the migration has been applied.
+
+    Non-blocking: any DB error is logged and swallowed so it never kills the pipeline.
+    """
+    try:
+        from backend.db.client import get_supabase_admin, using_local_db
+        if using_local_db():
+            return  # No-op in local mode — assets table doesn't exist locally
+
+        db = get_supabase_admin()
+        row = {
+            "run_id": run_id,
+            "product_id": product_id,
+            "market": market,
+            "aspect_ratio": aspect_ratio,
+            "language": language,
+            "storage_url": storage_url,
+            "storage_path": storage_path,
+            "prompt_hash": prompt_hash,
+            "reused": reused,
+            "compliance_passed": None,  # set later by compliance_post
+        }
+
+        try:
+            # Fast path: upsert (requires uq_asset_per_run constraint)
+            db.table("assets").upsert(
+                row,
+                on_conflict="run_id,product_id,market,aspect_ratio",
+            ).execute()
+            log.debug("assets.upserted", product=product_id, market=market, ratio=aspect_ratio)
+
+        except Exception as upsert_err:
+            err_str = str(upsert_err)
+            if "42P10" in err_str or "no unique or exclusion constraint" in err_str:
+                # Constraint not yet applied — fall back to UPDATE-or-INSERT
+                log.warning(
+                    "assets.upsert_constraint_missing",
+                    hint="Run migration_add_asset_unique.sql in Supabase SQL Editor",
+                    product=product_id, market=market, ratio=aspect_ratio,
+                )
+                existing = db.table("assets").select("id").eq(
+                    "run_id", run_id
+                ).eq("product_id", product_id).eq(
+                    "market", market
+                ).eq("aspect_ratio", aspect_ratio).execute()
+
+                if existing.data:
+                    db.table("assets").update({
+                        "language": language,
+                        "storage_url": storage_url,
+                        "storage_path": storage_path,
+                    }).eq("id", existing.data[0]["id"]).execute()
+                    log.debug("assets.updated_fallback", product=product_id, market=market)
+                else:
+                    db.table("assets").insert(row).execute()
+                    log.debug("assets.inserted_fallback", product=product_id, market=market)
+            else:
+                raise  # Re-raise unexpected errors to outer handler
+
+    except Exception as e:
+        log.warning("assets.upsert_failed", product=product_id, market=market,
+                    ratio=aspect_ratio, error=str(e))
+
+
 async def composite_node(state: PipelineState) -> PipelineState:
     run_id = state["run_id"]
     await broadcast(run_id, "composite", "STARTED", {"message": "Compositing creatives for all aspect ratios..."})
@@ -189,50 +269,44 @@ async def composite_node(state: PipelineState) -> PipelineState:
     aspect_ratios = brief.aspect_ratios
 
     generated_assets = [GeneratedAsset.model_validate(a) for a in state.get("generated_assets", [])]
-    # Build lookup: (product_id, market) → GeneratedAsset
-    asset_lookup = {(a.product_id, a.market): a for a in generated_assets}
 
-    # Build message lookup: market_id → tagline/message
-    message_lookup = {}
-    for m in brief.markets:
-        msg = m.message or ""
-        message_lookup[m.market_id] = msg
+    # Build message lookup: market_id → headline message
+    message_lookup = {m.market_id: (m.message or "") for m in brief.markets}
+
+    # Build prompt_hash lookup: (product_id, market) → prompt_hash
+    hash_lookup = {(a.product_id, a.market): a.prompt_hash for a in generated_assets}
+    reused_lookup = {(a.product_id, a.market): a.reused for a in generated_assets}
 
     composited_assets: list[dict] = []
-    total = len(generated_assets) * len(aspect_ratios)
-    done = 0
+    errors: list[str] = list(state.get("errors", []))
 
     for asset in generated_assets:
-        # Load base image from storage
         try:
             img_bytes = await storage.load(asset.storage_path)
             base_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         except Exception as e:
             log.error("composite.load_failed", path=asset.storage_path, error=str(e))
+            errors.append(f"composite load {asset.product_id}×{asset.market}: {e}")
             continue
 
         headline = message_lookup.get(asset.market, "")
         logo_path = f"assets/brand/{brief.brand.lower()}_logo.png"
+        prompt_hash = hash_lookup.get((asset.product_id, asset.market), "")
+        reused = reused_lookup.get((asset.product_id, asset.market), False)
 
         for ratio in aspect_ratios:
             target_w, target_h = ASPECT_DIMENSIONS.get(ratio, (1024, 1024))
             ratio_key = ratio.replace(":", "x")
 
             try:
-                # 1. Smart crop to target canvas
+                # 1. Smart crop → 2. Gradient overlay → 3. Logo → 4. Text
                 img = smart_crop(base_img.copy(), target_w, target_h)
-
-                # 2. Gradient overlay for text legibility
                 img = add_gradient_overlay(
                     img,
                     brand_config.get("overlay_color", "#000000"),
                     brand_config.get("overlay_opacity", 0.55),
                 )
-
-                # 3. Logo composite
                 img = composite_logo(img, logo_path, brand_config.get("logo_position", "bottom_right"))
-
-                # 4. Text overlay (headline only at this stage; localized tagline added in localize node)
                 img = render_text(
                     img,
                     headline=headline,
@@ -242,7 +316,7 @@ async def composite_node(state: PipelineState) -> PipelineState:
                     color=brand_config.get("primary_color", "#FFFFFF"),
                 )
 
-                # 5. Save to storage
+                # 5. Save to Supabase Storage
                 buf = io.BytesIO()
                 img.save(buf, format="PNG", optimize=True)
                 img_bytes_out = buf.getvalue()
@@ -250,30 +324,47 @@ async def composite_node(state: PipelineState) -> PipelineState:
                 storage_path = f"{run_id}/{asset.product_id}/{asset.market}/{ratio_key}.png"
                 url = await storage.save(storage_path, img_bytes_out)
 
-                composited_assets.append(CompositedAsset(
+                composited_asset = CompositedAsset(
                     product_id=asset.product_id,
                     market=asset.market,
                     aspect_ratio=ratio,
-                    language="en",  # will be updated by localize node
+                    language="en",
                     storage_url=url,
                     storage_path=storage_path,
-                ).model_dump())
+                )
+                composited_assets.append(composited_asset.model_dump())
 
-                done += 1
-                log.info("composite.done", product=asset.product_id, market=asset.market, ratio=ratio)
+                # 6. INSERT into Supabase assets table → fires Realtime to frontend
+                _upsert_asset_row(
+                    run_id=run_id,
+                    product_id=asset.product_id,
+                    market=asset.market,
+                    aspect_ratio=ratio,
+                    language="en",
+                    storage_url=url,
+                    storage_path=storage_path,
+                    prompt_hash=prompt_hash,
+                    reused=reused,
+                )
+
+                log.info("composite.done", product=asset.product_id,
+                         market=asset.market, ratio=ratio, url=url)
 
             except Exception as e:
-                log.error("composite.ratio_failed", product=asset.product_id, market=asset.market, ratio=ratio, error=str(e))
-                state["errors"] = state.get("errors", []) + [f"composite {asset.product_id}×{asset.market}×{ratio}: {e}"]
+                log.error("composite.ratio_failed", product=asset.product_id,
+                          market=asset.market, ratio=ratio, error=str(e))
+                errors.append(f"composite {asset.product_id}×{asset.market}×{ratio}: {e}")
 
     log.info("node.composite.complete", run_id=run_id, count=len(composited_assets))
     await broadcast(run_id, "composite", "COMPLETED", {
         "composited_count": len(composited_assets),
         "aspect_ratios": aspect_ratios,
+        "db_rows_written": len(composited_assets),
     })
 
     return {
         **state,
         "composited_assets": composited_assets,
+        "errors": errors,
         "current_node": "composite",
     }

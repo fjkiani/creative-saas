@@ -49,33 +49,42 @@ CREATE TABLE IF NOT EXISTS run_events (
 CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id);
 
 -- ── assets ───────────────────────────────────────────────────
--- Metadata for every generated/composited image
--- Actual files live in Supabase Storage: creative-assets/{run_id}/{product_id}/{market}/{ratio}.png
+-- Metadata for every generated/composited image.
+-- Actual files live in Supabase Storage: creative-assets/{run_id}/{product_id}/{market}/{lang}_{ratio}.png
+--
+-- The unique constraint on (run_id, product_id, market, aspect_ratio) enables
+-- upsert semantics: composite node INSERTs with language='en', then localize
+-- node UPSERTs to update language + storage_url with the final localized asset.
 CREATE TABLE IF NOT EXISTS assets (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id            UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     product_id        TEXT NOT NULL,
     market            TEXT NOT NULL,
-    aspect_ratio      TEXT NOT NULL,   -- 1x1 | 9x16 | 16x9
+    aspect_ratio      TEXT NOT NULL,   -- 1:1 | 9:16 | 16:9
     language          TEXT NOT NULL DEFAULT 'en',
     storage_url       TEXT,            -- public URL from Supabase Storage
     storage_path      TEXT,            -- internal path in bucket
     prompt_hash       TEXT,            -- SHA256 of (product_id + market + prompt) for cache lookup
     reused            BOOLEAN NOT NULL DEFAULT FALSE,
-    compliance_passed BOOLEAN,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    compliance_passed BOOLEAN,         -- set by compliance_post node
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Unique constraint required for upsert on_conflict clause
+    CONSTRAINT uq_asset_per_run UNIQUE (run_id, product_id, market, aspect_ratio)
 );
 
 CREATE INDEX IF NOT EXISTS idx_assets_run_id ON assets(run_id);
 CREATE INDEX IF NOT EXISTS idx_assets_prompt_hash ON assets(prompt_hash);
 
--- ── Enable Realtime on run_events ────────────────────────────
--- This is what the React frontend subscribes to
+-- ── Enable Realtime ───────────────────────────────────────────
+-- run_events: drives live PipelineTracker in the frontend
+-- assets: drives live AssetGrid updates as each image is composited
+-- runs: drives status badge updates
 ALTER PUBLICATION supabase_realtime ADD TABLE run_events;
 ALTER PUBLICATION supabase_realtime ADD TABLE runs;
 ALTER PUBLICATION supabase_realtime ADD TABLE assets;
 
--- ── Row Level Security (enterprise-ready, disabled for local POC) ──
+-- ── Row Level Security (enterprise-ready, disabled for POC) ──
 -- Uncomment and configure for multi-tenant production deployment
 -- ALTER TABLE campaigns ENABLE ROW LEVEL SECURITY;
 -- ALTER TABLE runs ENABLE ROW LEVEL SECURITY;

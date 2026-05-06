@@ -1,7 +1,14 @@
 """
 Run report writer.
-Produces a structured JSON report for each pipeline run, saved to Supabase
-and optionally to the local outputs/ directory.
+Produces a structured JSON report for each pipeline run.
+
+Saves to:
+  1. Supabase `runs` table (run_report JSONB column)
+  2. Local outputs/ directory (fallback / debug)
+
+The asset_summary section is enriched from the Supabase `assets` table
+(authoritative source) so the run_report always reflects what's actually
+in storage, not just what's in the pipeline state dict.
 """
 import json
 import structlog
@@ -12,13 +19,41 @@ from backend.graph.state import PipelineState
 log = structlog.get_logger(__name__)
 
 
-def build_run_report(state: PipelineState) -> dict:
-    """Build a structured run report from the final pipeline state."""
+def _fetch_assets_from_db(run_id: str) -> list[dict]:
+    """
+    Pull the final asset rows from Supabase for this run.
+    Returns empty list if Supabase is not configured or query fails.
+    """
+    try:
+        from backend.db.client import get_supabase_admin, using_local_db
+        if using_local_db():
+            return []
+        db = get_supabase_admin()
+        result = db.table("assets").select(
+            "id,product_id,market,aspect_ratio,language,"
+            "storage_url,storage_path,prompt_hash,reused,compliance_passed,created_at"
+        ).eq("run_id", run_id).order("created_at").execute()
+        return result.data or []
+    except Exception as e:
+        log.warning("reporter.fetch_assets_failed", run_id=run_id, error=str(e))
+        return []
+
+
+def build_run_report(state: PipelineState, db_assets: list[dict] | None = None) -> dict:
+    """
+    Build a structured run report from the final pipeline state.
+
+    db_assets: rows from Supabase assets table (preferred).
+               Falls back to state composited_assets if None or empty.
+    """
     brief = state.get("brief", {})
     compliance_pre = state.get("pre_compliance", {})
     compliance_post = state.get("post_compliance", {})
     composited = state.get("composited_assets", [])
     generated = state.get("generated_assets", [])
+
+    # Use DB assets as authoritative source; fall back to state
+    asset_rows = db_assets if db_assets else composited
 
     return {
         "run_id": state["run_id"],
@@ -38,10 +73,11 @@ def build_run_report(state: PipelineState) -> dict:
         },
         "creative_spec": state.get("creative_spec"),
         "asset_summary": {
-            "total_composited": len(composited),
+            "total_composited": len(asset_rows),
             "total_generated": len(generated),
             "reused": sum(1 for a in generated if a.get("reused")),
-            "assets": composited,
+            # Full asset list with storage URLs — used by frontend fallback path
+            "assets": asset_rows,
         },
         "compliance": {
             "pre_generation": compliance_pre,
@@ -58,20 +94,31 @@ def build_run_report(state: PipelineState) -> dict:
 
 
 async def save_run_report(state: PipelineState) -> dict:
-    """Save run report to Supabase DB and local outputs/ directory."""
-    report = build_run_report(state)
+    """
+    Save run report to Supabase DB and local outputs/ directory.
+
+    Asset summary is pulled from the Supabase assets table (authoritative)
+    so the report reflects the final persisted state, not just in-memory state.
+    """
     run_id = state["run_id"]
 
-    # Save to Supabase
+    # Pull authoritative asset rows from DB
+    db_assets = _fetch_assets_from_db(run_id)
+    log.info("reporter.assets_from_db", run_id=run_id, count=len(db_assets))
+
+    report = build_run_report(state, db_assets=db_assets if db_assets else None)
+
+    # ── Save to Supabase runs table ───────────────────────────────────────────
     try:
         from backend.db.client import get_supabase_admin
         db = get_supabase_admin()
         db.table("runs").update({"run_report": report}).eq("id", run_id).execute()
-        log.info("reporter.saved_to_supabase", run_id=run_id)
+        log.info("reporter.saved_to_supabase", run_id=run_id,
+                 asset_count=len(report["asset_summary"]["assets"]))
     except Exception as e:
         log.warning("reporter.supabase_save_failed", run_id=run_id, error=str(e))
 
-    # Save to local outputs/ directory
+    # ── Save to local outputs/ directory (debug / offline fallback) ───────────
     try:
         output_dir = Path(f"outputs/{run_id}")
         output_dir.mkdir(parents=True, exist_ok=True)

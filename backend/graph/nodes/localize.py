@@ -5,6 +5,9 @@ LLM-powered copy localization for each product × market combination.
 Goes beyond literal translation — adapts tone, register, and cultural nuance
 for each target market. Falls back to English if translation confidence is low.
 
+After re-compositing with localized text, UPSERTs the assets table row so the
+frontend Realtime subscription receives the final localized storage_url.
+
 Supported out of the box: EN, ES, FR, DE, JA, PT-BR (configurable via brief).
 """
 import io
@@ -20,7 +23,8 @@ from backend.storage.base import get_storage_backend
 from backend.graph.nodes._broadcast import broadcast
 from backend.graph.nodes.composite import (
     load_brand_config, smart_crop, add_gradient_overlay,
-    composite_logo, render_text, _load_font, _wrap_text, ASPECT_DIMENSIONS
+    composite_logo, render_text, _load_font, _wrap_text,
+    ASPECT_DIMENSIONS, _upsert_asset_row,
 )
 import yaml
 
@@ -89,9 +93,8 @@ async def localize_node(state: PipelineState) -> PipelineState:
         log.info("node.localize.copies_generated", run_id=run_id, count=len(copy_set.copies))
 
         # Re-composite images with localized text overlays
-        updated_assets = await _apply_localized_text(
-            state, brief, copy_set.copies
-        )
+        # Also UPSERTs assets table rows with final language + storage_url
+        updated_assets = await _apply_localized_text(state, brief, copy_set.copies)
 
         await broadcast(run_id, "localize", "COMPLETED", {
             "copy_count": len(copy_set.copies),
@@ -109,7 +112,11 @@ async def localize_node(state: PipelineState) -> PipelineState:
     except Exception as e:
         log.error("node.localize.failed", run_id=run_id, error=str(e))
         await broadcast(run_id, "localize", "FAILED", {"error": str(e)})
-        return {**state, "errors": state.get("errors", []) + [f"localize: {e}"], "current_node": "localize"}
+        return {
+            **state,
+            "errors": state.get("errors", []) + [f"localize: {e}"],
+            "current_node": "localize",
+        }
 
 
 async def _apply_localized_text(
@@ -120,6 +127,11 @@ async def _apply_localized_text(
     """
     Re-render composited images with localized headline + tagline.
     Replaces the English-only composites from node 5.
+
+    For each updated asset:
+    - Saves new localized PNG to Supabase Storage
+    - UPSERTs the assets table row (language, storage_url, storage_path updated)
+      → fires Realtime UPDATE event → frontend swaps to localized version live
     """
     storage = get_storage_backend()
     brand_config = load_brand_config(brief.brand)
@@ -127,6 +139,16 @@ async def _apply_localized_text(
 
     # Build copy lookup: (product_id, market) → LocalizedCopy
     copy_lookup = {(c.product_id, c.market): c for c in copies}
+
+    # Build prompt_hash + reused lookup from generated_assets
+    hash_lookup = {
+        (a["product_id"], a["market"]): a.get("prompt_hash", "")
+        for a in state.get("generated_assets", [])
+    }
+    reused_lookup = {
+        (a["product_id"], a["market"]): a.get("reused", False)
+        for a in state.get("generated_assets", [])
+    }
 
     updated_assets: list[dict] = []
 
@@ -156,7 +178,8 @@ async def _apply_localized_text(
             buf = io.BytesIO()
             img.save(buf, format="PNG", optimize=True)
 
-            # Save with language suffix
+            # Save with language suffix — organized as:
+            # {run_id}/{product_id}/{market}/{lang}_{ratio}.png
             ratio_key = asset.aspect_ratio.replace(":", "x")
             localized_path = f"{run_id}/{asset.product_id}/{asset.market}/{copy.language}_{ratio_key}.png"
             url = await storage.save(localized_path, buf.getvalue())
@@ -171,8 +194,27 @@ async def _apply_localized_text(
             )
             updated_assets.append(updated.model_dump())
 
+            # UPSERT assets table — updates language + storage_url on the existing row
+            # This fires a Realtime UPDATE event so the frontend swaps the image live
+            _upsert_asset_row(
+                run_id=run_id,
+                product_id=asset.product_id,
+                market=asset.market,
+                aspect_ratio=asset.aspect_ratio,
+                language=copy.language,
+                storage_url=url,
+                storage_path=localized_path,
+                prompt_hash=hash_lookup.get((asset.product_id, asset.market), ""),
+                reused=reused_lookup.get((asset.product_id, asset.market), False),
+            )
+
+            log.info("localize.recomposite_done",
+                     product=asset.product_id, market=asset.market,
+                     lang=copy.language, ratio=asset.aspect_ratio, url=url)
+
         except Exception as e:
-            log.error("localize.recomposite_failed", asset=asset.storage_path, error=str(e))
+            log.error("localize.recomposite_failed",
+                      asset=asset.storage_path, error=str(e))
             updated_assets.append(asset_dict)
 
     return updated_assets
