@@ -1,19 +1,27 @@
-# Render deployment blueprint — Creative Automation Pipeline v3
+# Render deployment blueprint — CreativeOS v4 (creative-saas)
 services:
   # ── Backend (FastAPI) ────────────────────────────────────────────────────────
   - type: web
-    name: creative-pipeline-backend
+    name: creative-saas-backend
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
     plan: starter
     healthCheckPath: /api/health
     envVars:
+      # ── Auth ─────────────────────────────────────────────────────────────────
+      - key: PIPELINE_API_KEY
+        sync: false
+
       # ── LLM / Image ──────────────────────────────────────────────────────────
       - key: GEMINI_API_KEY
         sync: false
-      - key: PIPELINE_API_KEY
+      - key: OPENAI_API_KEY
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false          # Required for video gen (Wan-2.6, Hailuo) + vision (Llama)
       - key: IMAGE_PROVIDER
         value: gemini
       - key: LLM_PROVIDER
@@ -33,13 +41,37 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
 
+      # ── Social Publishing ─────────────────────────────────────────────────────
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false          # Meta Graph API long-lived token
+      - key: INSTAGRAM_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: TIKTOK_ACCESS_TOKEN
+        sync: false          # TikTok Content Posting API v2
+      - key: TIKTOK_OPEN_ID
+        sync: false
+
+      # ── Competitor Analysis ───────────────────────────────────────────────────
+      - key: APIFY_API_TOKEN
+        sync: false          # For Instagram/TikTok scraping via Apify
+
+      # ── Billing (Stripe) ──────────────────────────────────────────────────────
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID_PRO
+        sync: false
+      - key: STRIPE_PRICE_ID_ENTERPRISE
+        sync: false
+
       # ── CORS — allow frontend origin ──────────────────────────────────────────
       - key: CORS_ORIGINS
         value: "*"
 
   # ── Frontend (React/Vite → nginx) ────────────────────────────────────────────
   - type: web
-    name: creative-pipeline-frontend
+    name: creative-saas-frontend
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
@@ -50,9 +82,16 @@ services:
         value: https://cllqahmtyvdcbyyrouxx.supabase.co
       - key: VITE_SUPABASE_ANON_KEY
         value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE
+      # API URL baked into bundle — empty string = use nginx proxy (correct for production)
+      # For local dev, set VITE_API_URL=http://localhost:8000 in frontend/.env.local
+      - key: VITE_API_URL
+        value: ""
+      # API key baked into bundle — must match PIPELINE_API_KEY on backend
+      - key: VITE_API_KEY
+        sync: false
     envVars:
       # Runtime nginx substitution — points to the backend service
       - key: BACKEND_URL
-        value: https://creative-pipeline-backend.onrender.com
+        value: https://creative-saas-backend.onrender.com
       - key: API_KEY
         sync: false

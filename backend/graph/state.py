@@ -1,8 +1,16 @@
 """
-Pipeline state and all shared Pydantic models.
+Pipeline state and all shared Pydantic models — CreativeOS v4.
 
 PipelineState is the single source of truth passed between every LangGraph node.
 All structured LLM outputs are Pydantic models — no raw string parsing anywhere.
+
+v4 additions:
+  - competitor_brief: output of competitor_analyze node (optional entry point)
+  - video_outputs: output of video_gen node
+  - publish_results: output of publish node
+  - video_mode: "slideshow" | "ai" | "none"
+  - publish_platforms: ["instagram", "tiktok"]
+  - scheduled_publish_time: ISO datetime or None
 
 Note on naming: LangGraph prohibits node names that match state keys.
 State keys that store node outputs use the _result suffix to avoid collision.
@@ -72,7 +80,7 @@ class CampaignBrief(BaseModel):
     products: list[ProductBrief]
     markets: list[MarketBrief]
     aspect_ratios: list[str] = Field(default=["1:1", "9:16", "16:9"])
-    style_hints: dict | None = None
+    style_hints: dict | None = None  # populated by competitor_analyze node
 
 
 # ── LLM output models (structured outputs) ───────────────────────────────────
@@ -157,6 +165,50 @@ class CompositedAsset(BaseModel):
     storage_url: str
     storage_path: str
     compliance_passed: bool | None = None  # set by compliance_post node
+    # v4: layer paths for canvas editor
+    layer_base_path: str | None = None
+    layer_gradient_path: str | None = None
+    layer_logo_path: str | None = None
+    layer_text_path: str | None = None
+
+
+# ── v4: Competitor analysis models ───────────────────────────────────────────
+
+class CompetitorAnalysis(BaseModel):
+    """Output of competitor_analyze node."""
+    layout_description: str
+    color_palette: list[str]
+    emotional_tone: str
+    claims_made: list[str]
+    strengths: list[str]
+    weaknesses: list[str]
+    counter_strategy: str
+    style_hints: dict  # fed into CampaignBrief.style_hints → enrich node
+
+
+# ── v4: Video output models ───────────────────────────────────────────────────
+
+class VideoOutput(BaseModel):
+    """One generated video (one per aspect ratio)."""
+    ratio: str           # "1:1" | "9:16" | "16:9"
+    mode: str            # "slideshow" | "ai"
+    storage_url: str
+    storage_path: str
+    duration_s: float
+
+
+# ── v4: Publish result models ─────────────────────────────────────────────────
+
+class PublishResult(BaseModel):
+    """Result of publishing one asset to one platform."""
+    platform: str        # "instagram" | "tiktok"
+    market: str
+    post_url: str | None = None
+    post_id: str | None = None
+    published_at: str | None = None
+    scheduled_for: str | None = None
+    status: str          # "published" | "scheduled" | "failed"
+    error: str | None = None
 
 
 # ── LangGraph state ───────────────────────────────────────────────────────────
@@ -188,6 +240,18 @@ class PipelineState(TypedDict):
     review_decision: str | None          # "approved" | "rejected" | None
     review_score: float | None           # confidence score 0–1
     reviewer_notes: str | None           # human reviewer notes
+
+    # v4: Competitor analysis (optional — populated by competitor_analyze node)
+    competitor_brief: dict | None        # CompetitorAnalysis serialized to dict
+
+    # v4: Video generation
+    video_outputs: list[dict]            # list of VideoOutput dicts
+    video_mode: str                      # "slideshow" | "ai" | "none"
+
+    # v4: Publishing
+    publish_results: list[dict]          # list of PublishResult dicts
+    publish_platforms: list[str]         # ["instagram", "tiktok"]
+    scheduled_publish_time: str | None   # ISO datetime or None
 
     # Execution metadata
     current_node: str

@@ -1,417 +1,169 @@
+# CreativeOS v4 — AI Creative Automation SaaS
 
-Demo: https://cap.link/q3vzsxrxr484qp5
+End-to-end AI pipeline that turns a campaign brief into production-ready social assets, videos, and published posts — with competitor intelligence, canvas editing, and SaaS billing.
 
-Deployed link: https://creative-pipeline-frontend.onrender.com/
+## What It Does
 
-# Creative Automation Pipeline v3
+1. **Competitor Analysis** — Upload competitor ads; vision AI extracts style, color, and messaging patterns to inform your brief
+2. **Brief Enrichment** — LLM expands a sparse brief into structured prompts per product × market × ratio
+3. **Compliance Pre-flight** — Checks claims against prohibited list before spending on image generation
+4. **Image Generation** — Gemini Imagen 3, DALL-E 3, Adobe Firefly, or Stable Diffusion
+5. **Compositing** — Pillow-based compositor: crop, overlay, text, logo, brand colors — all layers saved to Supabase
+6. **Canvas Editor** — Browser-based layer editor for post-generation tweaks (text, logo position, color)
+7. **Localization** — LLM rewrites copy per market locale; re-composites with translated text
+8. **Compliance Post-check** — OpenCV brand compliance: color accuracy, logo presence, text readability
+9. **Video Generation** — Slideshow (free, moviepy) or AI video (Wan-2.6 / Hailuo via OpenRouter)
+10. **Social Publishing** — Instagram (image / carousel / Reels) + TikTok (video / photo carousel)
+11. **Human-in-the-Loop** — Review gate with approve/reject; resumes pipeline from checkpoint
+12. **SaaS Billing** — Stripe Checkout + webhook; workspace isolation per customer
 
-Client: A global consumer goods company launching hundreds of localized social ad
-campaigns monthly.   
-Objective: Design a creative automation pipeline that enables the creative team to
-generate variations for campaign assets.
-
-A production-grade GenAI creative automation pipeline that turns a campaign brief into hundreds of localized, multi-ratio, multi-platform ad creatives — with human-in-the-loop review, parallel image generation, and one-click Render deployment.
-
-**Architecture**: FastAPI + LangGraph + React/Vite + Supabase Realtime  
-**Default models**: Gemini 2.5 Pro (LLM) + `gemini-2.5-flash-image` (image generation)  
-**Swappable to**: OpenAI GPT-4o/DALL-E 3, Anthropic Claude, Adobe Firefly Image5, Stability SD3.5
-
----
-
-## Pipeline Topology
-
-```
-START → enrich → prompt_gen → compliance_pre ──(HARD FAIL)──→ END
-                                             └──(PASS)──────→ image_gen (parallel)
-                                                               → composite
-                                                               → review_gate ──(auto-reject)──→ END
-                                                                             └──(pending)────→ [HUMAN REVIEW]
-                                                                             └──(approved)───→ localize
-                                                                                              → compliance_post
-                                                                                              → END
-```
-
-### Nodes
-
-| Node | Description |
-|------|-------------|
-| `enrich` | LLM enriches brief → `CreativeSpec` (visual style, mood, palette, brand voice) |
-| `prompt_gen` | LLM generates one optimized image prompt per product × market |
-| `compliance_pre` | LLM scans prompts for prohibited words, health claims, superlatives, competitor mentions |
-| `image_gen` | Parallel image generation via `asyncio.gather` + semaphore (configurable concurrency) |
-| `composite` | Pillow compositor: smart crop → gradient overlay → logo → text per aspect ratio |
-| `review_gate` | **HITL threshold valve**: auto-approve / auto-reject / pause for human review |
-| `localize` | LLM localizes copy (headline, tagline, CTA) per market; re-composites images |
-| `compliance_post` | Pixel-level checks: logo detection (OpenCV), brand color adherence (k-means), text scan |
-
----
-
-## Human-in-the-Loop (HITL) Review Gate
-
-The `review_gate` node implements the **threshold valve** pattern — a configurable confidence score determines whether a run needs human review.
-
-### Confidence Score
-
-Computed from the pre-compliance report:
+## Architecture
 
 ```
-score = 1.0 - (0.15 × warning_count) - (0.50 × error_count)
-score = clamp(score, 0.0, 1.0)
+START → competitor_analyze → enrich → prompt_gen → compliance_pre
+                                                     ↓ (pass)
+                                                image_gen → composite → review_gate
+                                                                         ↓ (approved)
+                                                                    localize → compliance_post
+                                                                                ↓
+                                                                          video_gen → publish → END
 ```
 
-### Routing
+**Stack**: FastAPI + LangGraph (backend) · React + Vite + Supabase Realtime (frontend) · Supabase (Postgres + Storage) · Render (hosting)
 
-| Score | Action |
-|-------|--------|
-| `score >= HITL_AUTO_APPROVE` (default: 0.85) | Auto-approve → pipeline continues |
-| `score < HITL_AUTO_REJECT` (default: 0.60) | Auto-reject → run status: `REJECTED` |
-| Between thresholds | Pause → run status: `PENDING_REVIEW` → human decision required |
+## Quick Start
 
-### Thresholds
+### Prerequisites
+- Python 3.11+
+- Node 20+
+- Supabase project (free tier works)
 
-Configure via env vars:
-
+### 1. Clone & configure
 ```bash
-HITL_AUTO_APPROVE=0.85   # raise to require more human review
-HITL_AUTO_REJECT=0.60    # lower to be more permissive
-```
-
-### Resuming a Paused Run
-
-When a run enters `PENDING_REVIEW`, the frontend shows a **ReviewCard** with:
-- Compliance score and issue breakdown
-- Sample composited asset previews
-- Approve / Reject buttons with optional reviewer notes
-
-Or call the API directly:
-
-```bash
-curl -X POST https://your-backend.onrender.com/api/runs/{run_id}/review \
-  -H "X-Api-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"decision": "approve", "reviewer_notes": "Looks good for FR market"}'
-```
-
-### LangGraph Checkpointing
-
-The pipeline uses `MemorySaver` for in-process checkpointing — sufficient for a single Render instance. For multi-instance deployments:
-
-```python
-# pipeline.py — swap MemorySaver for AsyncPostgresSaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-checkpointer = AsyncPostgresSaver.from_conn_string(os.getenv("DATABASE_URL"))
-```
-
-Install: `pip install langgraph-checkpoint-postgres`
-
----
-
-## Hero Asset Input (1 Hero → Many Variants)
-
-The pipeline supports the **"1 hero asset → hundreds of variants"** pattern. Provide an existing product image in the brief and the pipeline uses it as a visual reference for all market/ratio variants.
-
-### In your brief YAML
-
-```yaml
-products:
-  - id: radiance-serum
-    name: Lumina Radiance Serum
-    description: ...
-    existing_asset: /path/to/hero_product_shot.png   # local path
-    # OR
-    existing_asset: https://cdn.example.com/hero.jpg  # HTTP URL
-```
-
-When `existing_asset` is set:
-- The image is loaded (local path or fetched from URL)
-- Passed to `generate_with_reference()` in the Gemini provider as an inline reference
-- Gemini uses it as a visual anchor for product appearance and style
-- Each market gets a culturally adapted variant maintaining product identity
-
-When `existing_asset` is `null` or omitted, the pipeline generates from scratch using the text prompt.
-
-> **Note**: Reference-based generation is best-effort — the model adapts the reference rather than pixel-perfectly preserving it. For strict inpainting or mask-based editing, use Adobe Firefly Image5 (`IMAGE_PROVIDER=firefly`) which supports explicit mask regions.
-
----
-
-## Parallel Image Generation
-
-Images are generated concurrently using `asyncio.gather` with a semaphore:
-
-```python
-IMAGE_GEN_CONCURRENCY=3   # default: 3 concurrent API calls
-```
-
-- **3–4× faster** than sequential generation on a 6-prompt batch
-- Semaphore prevents rate-limit hammering
-- `return_exceptions=True` — one failure doesn't cancel the batch
-- Failed prompts are logged to `state["errors"]`; successful ones proceed
-
-Tune via env var:
-```bash
-IMAGE_GEN_CONCURRENCY=5   # increase for larger batches / higher rate limits
-IMAGE_GEN_CONCURRENCY=1   # set to 1 to restore sequential behavior
-```
-
----
-
-## API Authentication
-
-All `/api/*` routes (except `/api/health`) require an `X-Api-Key` header when `PIPELINE_API_KEY` is set.
-
-```bash
-# Set in .env or Render dashboard
-PIPELINE_API_KEY=your-strong-random-key
-
-# Use in API calls
-curl -H "X-Api-Key: your-strong-random-key" https://your-backend.onrender.com/api/runs
-```
-
-If `PIPELINE_API_KEY` is not set, auth is disabled (dev mode — a warning is logged at startup).
-
-**Production upgrade path**: Replace header-based key auth with JWT (e.g., Supabase Auth or Auth0). Add a `verify_jwt` dependency alongside `verify_api_key`.
-
----
-
-## Deployment
-
-### Render (Recommended)
-
-1. Fork this repo to your GitHub account
-2. Go to [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**
-3. Connect your repo — Render detects `render.yaml` automatically
-4. Set secret env vars in the Render dashboard:
-   - `GEMINI_API_KEY` — your Google AI Studio API key
-   - `PIPELINE_API_KEY` — a strong random string for API auth
-   - `VITE_API_URL` — the backend service URL (set after backend deploys)
-   - `VITE_API_KEY` — same as `PIPELINE_API_KEY`
-5. Click **Apply** — both services deploy automatically
-
-The backend uses a **10GB persistent disk** at `/workspace/outputs` for asset storage. For production at scale, switch to Supabase Storage:
-
-```bash
-STORAGE_BACKEND=supabase
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_KEY=your-service-key
-```
-
-### Local Development (Docker Compose)
-
-```bash
-# 1. Clone and configure
+git clone https://github.com/fjkiani/creative-saas.git
+cd creative-saas
 cp .env.example .env
-# Edit .env — set GEMINI_API_KEY at minimum
-
-# 2. Start all services
-docker compose up --build
-
-# 3. Access
-# Frontend: http://localhost:5173
-# Backend API: http://localhost:8000
-# API docs: http://localhost:8000/docs
-
-# 4. Run without Supabase (local storage only)
-docker compose up backend frontend
+# Edit .env — at minimum set GEMINI_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
 ```
 
-### Environment Variables
+### 2. Set up Supabase
+```sql
+-- In Supabase SQL Editor, run in order:
+-- 1. backend/db/schema.sql          (all tables)
+-- 2. backend/db/storage_bucket.sql  (creative-assets bucket)
+-- 3. backend/db/migrate_v3_to_v4.sql  (only if upgrading from v3)
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GEMINI_API_KEY` | — | **Required.** Google AI Studio API key |
-| `PIPELINE_API_KEY` | _(empty)_ | API auth key. Empty = auth disabled |
-| `IMAGE_PROVIDER` | `gemini` | Image gen provider: `gemini`, `dalle`, `firefly`, `stability` |
-| `LLM_PROVIDER` | `gemini` | LLM provider: `gemini`, `openai`, `anthropic` |
-| `STORAGE_BACKEND` | `local` | Storage: `local`, `supabase`, `s3`, `azure`, `dropbox` |
-| `IMAGE_GEN_CONCURRENCY` | `3` | Max concurrent image API calls |
-| `HITL_AUTO_APPROVE` | `0.85` | Confidence score threshold for auto-approval |
-| `HITL_AUTO_REJECT` | `0.60` | Confidence score threshold for auto-rejection |
-| `CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
-
----
-
-## Scaling to Production
-
-### Horizontal Scaling (Celery + Redis)
-
-The current implementation uses FastAPI background tasks (`asyncio.gather`) — sufficient for a single Render instance handling ~10 concurrent runs.
-
-For high-throughput production (100+ concurrent runs), migrate to Celery:
-
-**1. Install**
+Or use the init script:
 ```bash
-pip install celery[redis] redis
+pip install supabase
+python scripts/init_supabase_storage.py
 ```
 
-**2. Create `backend/worker.py`**
-```python
-from celery import Celery
-import asyncio
+### 3. Run locally
+```bash
+# Backend
+pip install -r requirements.txt
+uvicorn backend.main:app --reload --port 8000
 
-celery_app = Celery("pipeline", broker=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-
-@celery_app.task
-def run_pipeline_task(run_id: str, state: dict):
-    asyncio.run(run_pipeline_background(run_id, state))
+# Frontend (new terminal)
+cd frontend
+npm install
+cp .env.example .env.local
+# Edit .env.local with VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+npm run dev
 ```
 
-**3. Swap in `main.py`**
-```python
-# Before (FastAPI background task):
-background_tasks.add_task(run_pipeline_background, run_id, initial_state)
+Open http://localhost:5173
 
-# After (Celery task):
-from backend.worker import run_pipeline_task
-run_pipeline_task.delay(run_id, initial_state)
-```
+## Deploy to Render
 
-**4. Add to `render.yaml`**
-```yaml
-- type: worker
-  name: creative-pipeline-worker
-  runtime: docker
-  dockerfilePath: ./backend/Dockerfile
-  startCommand: celery -A backend.worker worker --loglevel=info --concurrency=4
-  envVars:
-    - key: REDIS_URL
-      fromService:
-        name: creative-pipeline-redis
-        type: redis
-        property: connectionString
-```
+1. Fork this repo
+2. In Render dashboard: **New → Blueprint** → connect your fork
+3. Render reads `render.yaml` and creates both services automatically
+4. Set secret env vars in Render dashboard (marked `sync: false` in render.yaml):
+   - `SUPABASE_SERVICE_ROLE_KEY` (required)
+   - `GEMINI_API_KEY` (required)
+   - `PIPELINE_API_KEY` (optional — enables API auth)
+   - `OPENROUTER_API_KEY` (for video gen + vision)
+   - `INSTAGRAM_ACCESS_TOKEN` + `INSTAGRAM_BUSINESS_ACCOUNT_ID` (for publishing)
+   - `TIKTOK_ACCESS_TOKEN` + `TIKTOK_OPEN_ID` (for publishing)
+   - `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (for billing)
 
-**5. Add Redis service**
-```yaml
-- type: redis
-  name: creative-pipeline-redis
-  plan: starter
-```
+## Environment Variables
 
----
+See `.env.example` for the full list with descriptions.
 
-## Project Structure
-
-```
-creative-pipeline/
-├── backend/
-│   ├── graph/
-│   │   ├── nodes/
-│   │   │   ├── enrich.py          # Node 1: brief enrichment
-│   │   │   ├── prompt_gen.py      # Node 2: image prompt generation
-│   │   │   ├── compliance_pre.py  # Node 3: pre-generation compliance
-│   │   │   ├── image_gen.py       # Node 4: parallel image generation
-│   │   │   ├── composite.py       # Node 5: aspect ratio compositor
-│   │   │   ├── review_gate.py     # Node 5.5: HITL threshold valve ← NEW v3
-│   │   │   ├── localize.py        # Node 6: copy localization + re-composite
-│   │   │   └── compliance_post.py # Node 7: pixel-level compliance checks
-│   │   ├── pipeline.py            # LangGraph graph + MemorySaver
-│   │   └── state.py               # PipelineState TypedDict + Pydantic models
-│   ├── providers/
-│   │   ├── base.py                # LLMProvider + ImageProvider ABCs
-│   │   ├── gemini.py              # Gemini 2.5 Pro + gemini-2.5-flash-image
-│   │   ├── openai_dalle.py        # GPT-4o + DALL-E 3
-│   │   ├── anthropic_claude.py    # Claude 3.5 Sonnet
-│   │   ├── firefly.py             # Adobe Firefly Image5
-│   │   └── stability.py           # Stability AI SD3.5
-│   ├── storage/
-│   │   ├── base.py                # StorageBackend ABC + factory
-│   │   ├── local.py               # Local filesystem (default)
-│   │   ├── supabase_storage.py    # Supabase Storage
-│   │   ├── s3.py                  # AWS S3
-│   │   ├── azure_blob.py          # Azure Blob Storage
-│   │   └── dropbox_storage.py     # Dropbox
-│   ├── main.py                    # FastAPI app + auth + HITL review endpoint
-│   ├── config.py                  # Settings (pydantic-settings)
-│   ├── reporter.py                # Run report generation
-│   └── Dockerfile
-├── frontend/
-│   └── src/
-│       ├── components/
-│       │   ├── ReviewCard.tsx     # HITL approve/reject UI ← NEW v3
-│       │   ├── PipelineTracker.tsx
-│       │   ├── AssetGrid.tsx
-│       │   ├── CompliancePanel.tsx
-│       │   └── BriefEditor.tsx
-│       └── pages/
-│           ├── NewCampaign.tsx
-│           └── RunDetail.tsx      # Updated: shows ReviewCard when PENDING_REVIEW
-├── assets/brand/
-│   ├── brand_configs/             # Per-brand YAML configs
-│   ├── lumina_logo.png
-│   └── apex_logo.png
-├── briefs/
-│   ├── lumina_skincare.yaml       # Example brief (Lumina skincare)
-│   └── apex_sportswear.yaml       # Example brief (Apex sportswear)
-├── render.yaml                    # Render deployment blueprint ← NEW v3
-├── docker-compose.yml             # Local dev stack
-├── .env.example                   # Environment variable template
-└── requirements.txt
-```
-
----
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes | Gemini LLM + Imagen 3 image gen |
+| `SUPABASE_URL` | Yes | `https://your-project.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Service role key (never expose to browser) |
+| `SUPABASE_ANON_KEY` | Yes | Anon key (safe for browser) |
+| `STORAGE_BACKEND` | Yes | `supabase` (or `local`, `s3`, `azure`) |
+| `OPENROUTER_API_KEY` | For video | Wan-2.6 / Hailuo video gen + Llama vision |
+| `INSTAGRAM_ACCESS_TOKEN` | For publishing | Meta Graph API long-lived token |
+| `TIKTOK_ACCESS_TOKEN` | For publishing | TikTok Content Posting API v2 |
+| `APIFY_API_TOKEN` | For competitor | Instagram/TikTok scraping |
+| `STRIPE_SECRET_KEY` | For billing | Stripe secret key |
 
 ## API Reference
 
-### `POST /api/runs`
-Submit a campaign brief and start the pipeline.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/runs` | Submit campaign brief, start pipeline |
+| `GET` | `/api/runs/{id}` | Get run status + report |
+| `GET` | `/api/runs` | List all runs |
+| `POST` | `/api/runs/{id}/review` | Approve or reject PENDING_REVIEW run |
+| `POST` | `/api/competitor` | Upload competitor images for analysis |
+| `GET` | `/api/assets/{id}/layers` | Get composited layer paths |
+| `POST` | `/api/assets/{id}/edit` | Apply canvas edit (text/logo/color) |
+| `GET` | `/api/runs/{id}/videos` | Get generated video outputs |
+| `POST` | `/api/runs/{id}/publish` | Trigger social publishing |
+| `POST` | `/api/workspaces` | Create workspace (SaaS tenant) |
+| `POST` | `/api/billing/checkout` | Create Stripe Checkout session |
+| `POST` | `/api/billing/webhook` | Stripe webhook receiver |
+| `GET` | `/api/health` | Health check (always public) |
 
-```bash
-curl -X POST http://localhost:8000/api/runs \
-  -H "X-Api-Key: your-key" \
-  -H "Content-Type: application/json" \
-  -d @briefs/lumina_skincare.json
-```
+## Database Schema
 
-Response: `{ "run_id": "...", "status": "PENDING" }`
+**v3 tables** (existing): `pipeline_runs`, `run_events`, `assets`, `campaigns`
 
-### `GET /api/runs/{run_id}`
-Get run status, events, and assets.
+**v4 tables** (new): `workspaces`, `asset_edits`, `video_outputs`, `publish_results`, `competitor_analyses`, `billing_events`
 
-### `POST /api/runs/{run_id}/review`
-Approve or reject a `PENDING_REVIEW` run.
+## Providers
 
-```bash
-curl -X POST http://localhost:8000/api/runs/{run_id}/review \
-  -H "X-Api-Key: your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"decision": "approve", "reviewer_notes": "Approved for all markets"}'
-```
+### LLM
+- `gemini` — Gemini 2.5 Pro (default)
+- `openai` — GPT-4o
+- `anthropic` — Claude 3.5 Sonnet
 
-### `GET /api/health`
-Health check (always public, no auth required).
+### Image Generation
+- `gemini` — Imagen 3 (default)
+- `openai` — DALL-E 3
+- `firefly` — Adobe Firefly Image 5
+- `stability` — Stable Diffusion 3.5
 
-```bash
-curl http://localhost:8000/api/health
-# {"status":"ok","version":"3.0.0","auth_enabled":true,"providers":{...}}
-```
+### Video Generation
+- `slideshow` — moviepy Ken Burns + cross-dissolve (free, no API key)
+- `wan` — Wan-2.6 via OpenRouter
+- `hailuo` — Hailuo via OpenRouter
 
----
+### Vision (Competitor Analysis)
+- `llama` — Llama 3.2 Vision via OpenRouter (free tier available)
 
-## Swapping Providers
+## Known Limitations
 
-All providers implement the same `LLMProvider` / `ImageProvider` abstract base class. Swap at runtime via env var — no code changes needed.
+1. **MemorySaver** — HITL review state is in-process only. Restart loses PENDING_REVIEW runs. Production fix: swap to `AsyncPostgresSaver` (see `backend/graph/pipeline.py` comments)
+2. **WanVideoProvider** — API shape is approximate; wan-2.6 endpoint may differ from OpenRouter docs at time of deployment
+3. **Instagram/TikTok OAuth** — Requires platform app approval (not instant). Use test accounts during development
+4. **Stripe webhook** — Must be registered in Stripe dashboard pointing to `https://your-backend.onrender.com/api/billing/webhook`
+5. **Competitor scraping** — Apify actor IDs may change; verify `apify/instagram-scraper` and `apify/tiktok-scraper` are current
 
-```bash
-# Use OpenAI for LLM + DALL-E 3 for images
-LLM_PROVIDER=openai
-IMAGE_PROVIDER=dalle
-OPENAI_API_KEY=sk-...
+## Changelog
 
-# Use Adobe Firefly for images (supports mask-based inpainting)
-IMAGE_PROVIDER=firefly
-FIREFLY_CLIENT_ID=...
-FIREFLY_CLIENT_SECRET=...
-```
+See [CHANGELOG.md](CHANGELOG.md) for v3 → v4 changes.
 
----
+## License
 
-## Live Run Results (v2 baseline)
-
-A full pipeline run on the Lumina skincare brief produced:
-- **2 products × 3 markets × 3 aspect ratios = 18 composited creatives**
-- All 7 nodes completed with 0 errors
-- Pre-compliance: PASSED (2 legal warnings: substantiation for "14 days" claim, vegan/cruelty-free certs)
-- Post-compliance: PASSED
-- Genuine FR localization: "Révélez Votre Éclat Naturel"
-- Image generation: ~1.2–1.4 MB per PNG via `gemini-2.5-flash-image`
+MIT

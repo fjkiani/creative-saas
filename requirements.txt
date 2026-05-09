@@ -1,5 +1,5 @@
 # ============================================================
-# Creative Automation Pipeline — Python Dependencies
+# CreativeOS v4 — Python Dependencies
 # ============================================================
 # Core versions validated against Python 3.11
 
@@ -25,6 +25,10 @@ Pillow>=11.0.0               # Compositor: crop, overlay, text, logo
 opencv-python-headless>=4.10.0.84  # Brand compliance: template matching, color analysis
 numpy>=1.26.0
 
+# ── v4: Video generation ─────────────────────────────────────
+moviepy>=1.0.3               # SlideshowVideoProvider: Ken Burns + cross-dissolve (Mode A, $0)
+# Note: moviepy requires ffmpeg. In Docker: apt-get install -y ffmpeg
+
 # ── Supabase ─────────────────────────────────────────────────
 supabase>=2.10.0             # Postgres DB + Storage + Realtime
 
@@ -32,6 +36,9 @@ supabase>=2.10.0             # Postgres DB + Storage + Realtime
 boto3>=1.35.0                # AWS S3 (STORAGE_BACKEND=s3)
 azure-storage-blob>=12.23.0  # Azure Blob (STORAGE_BACKEND=azure)
 dropbox>=12.0.0              # Dropbox (STORAGE_BACKEND=dropbox)
+
+# ── v4: Billing ───────────────────────────────────────────────
+stripe>=11.0.0               # Stripe subscriptions + webhooks + credits
 
 # ── Utilities ────────────────────────────────────────────────
 pyyaml>=6.0.2

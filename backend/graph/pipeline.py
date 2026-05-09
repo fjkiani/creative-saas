@@ -1,12 +1,22 @@
 """
-LangGraph pipeline definition — v3.
+LangGraph pipeline definition — CreativeOS v4.
 
 Topology:
-  START → enrich → prompt_gen → compliance_pre ──(pass)──→ image_gen → composite
-                                               └─(fail)──→ END
+  START → competitor_analyze (optional) → enrich → prompt_gen → compliance_pre
+        └─(no competitor data)──────────────────────────────────────────────────┘
 
-  composite → review_gate ──(approved)──→ localize → compliance_post → END
-                           └─(rejected)──→ END
+  compliance_pre ──(pass)──→ image_gen → composite
+                └─(fail)──→ END
+
+  composite → review_gate ──(approved)──→ localize → compliance_post
+                            └─(rejected)──→ END
+
+  compliance_post → video_gen → publish → END
+
+New nodes in v4:
+  - competitor_analyze: optional entry point, injects style_hints into brief
+  - video_gen: generates slideshow or AI video trailers
+  - publish: publishes to Instagram and TikTok
 
 Each node:
   - Reads from PipelineState
@@ -15,26 +25,13 @@ Each node:
 
 Checkpointing:
   MemorySaver is used for in-process checkpointing — sufficient for a single
-  Render instance. For multi-instance deployments, swap to AsyncPostgresSaver:
-
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-    checkpointer = AsyncPostgresSaver.from_conn_string(DATABASE_URL)
-
-  The review_gate node uses interrupt() to pause the graph when human review
-  is required. The graph resumes via:
-
-    await pipeline.ainvoke(
-        Command(resume={"decision": "approve", "reviewer_notes": "..."}),
-        config={"configurable": {"thread_id": run_id}},
-    )
-
-Background execution: FastAPI runs ainvoke() in a background asyncio task,
-so the HTTP response returns immediately with the run_id.
+  Render instance. For multi-instance deployments, swap to AsyncPostgresSaver.
 """
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from backend.graph.state import PipelineState
+from backend.graph.nodes.competitor_analyze import competitor_analyze_node
 from backend.graph.nodes.enrich import enrich_node
 from backend.graph.nodes.prompt_gen import prompt_gen_node
 from backend.graph.nodes.compliance_pre import compliance_pre_node, compliance_pre_router
@@ -43,21 +40,22 @@ from backend.graph.nodes.composite import composite_node
 from backend.graph.nodes.review_gate import review_gate_node, review_gate_router
 from backend.graph.nodes.localize import localize_node
 from backend.graph.nodes.compliance_post import compliance_post_node
+from backend.graph.nodes.video_gen import video_gen_node
+from backend.graph.nodes.publish_node import publish_node
 
 # Singleton MemorySaver — shared across all runs in this process.
-# Each run uses its run_id as the thread_id for isolation.
 checkpointer = MemorySaver()
 
 
 def build_pipeline() -> StateGraph:
     """
-    Build and compile the creative automation LangGraph pipeline.
-
+    Build and compile the CreativeOS v4 LangGraph pipeline.
     Returns a compiled graph ready for ainvoke().
     """
     graph = StateGraph(PipelineState)
 
     # ── Register nodes ────────────────────────────────────────────────────────
+    graph.add_node("competitor_analyze", competitor_analyze_node)
     graph.add_node("enrich", enrich_node)
     graph.add_node("prompt_gen", prompt_gen_node)
     graph.add_node("compliance_pre", compliance_pre_node)
@@ -66,26 +64,29 @@ def build_pipeline() -> StateGraph:
     graph.add_node("review_gate", review_gate_node)
     graph.add_node("localize", localize_node)
     graph.add_node("compliance_post", compliance_post_node)
+    graph.add_node("video_gen", video_gen_node)
+    graph.add_node("publish", publish_node)
 
     # ── Define edges ──────────────────────────────────────────────────────────
-    graph.set_entry_point("enrich")
+    # competitor_analyze is always the entry point (no-op if no competitor data)
+    graph.set_entry_point("competitor_analyze")
+    graph.add_edge("competitor_analyze", "enrich")
     graph.add_edge("enrich", "prompt_gen")
     graph.add_edge("prompt_gen", "compliance_pre")
 
-    # compliance_pre always continues to image_gen.
-    # The review_gate node (after composite) scores the compliance report
-    # and routes to approve / PENDING_REVIEW / reject.
+    # Conditional: compliance_pre can halt on hard errors
     graph.add_conditional_edges(
         "compliance_pre",
         compliance_pre_router,
         {
             "image_gen": "image_gen",
+            "end_with_error": END,
         },
     )
 
     graph.add_edge("image_gen", "composite")
 
-    # Conditional edge: review_gate routes to localize or END based on decision
+    # Conditional: review_gate routes to localize or END
     graph.add_edge("composite", "review_gate")
     graph.add_conditional_edges(
         "review_gate",
@@ -97,7 +98,9 @@ def build_pipeline() -> StateGraph:
     )
 
     graph.add_edge("localize", "compliance_post")
-    graph.add_edge("compliance_post", END)
+    graph.add_edge("compliance_post", "video_gen")
+    graph.add_edge("video_gen", "publish")
+    graph.add_edge("publish", END)
 
     # Compile with MemorySaver for interrupt/resume support
     return graph.compile(checkpointer=checkpointer)
