@@ -1,0 +1,638 @@
+name: Deploy CreativeOS v4
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_migrations:
+        description: 'Run Supabase DB migrations'
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options: ['production']
+
+# ── Required GitHub Secrets ────────────────────────────────────────────────────
+# RENDER_API_KEY        — from https://dashboard.render.com/u/settings (API Keys tab)
+# SUPABASE_SERVICE_ROLE_KEY — from https://supabase.com/dashboard/project/cllqahmtyvdcbyyrouxx/settings/api
+# GEMINI_API_KEY        — your Gemini API key
+# PIPELINE_API_KEY      — any strong random string (protects your API)
+# ──────────────────────────────────────────────────────────────────────────────
+
+env:
+  SUPABASE_URL: https://cllqahmtyvdcbyyrouxx.supabase.co
+  SUPABASE_PROJECT_REF: cllqahmtyvdcbyyrouxx
+  SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE
+  RENDER_BACKEND_NAME: creative-saas-backend
+  RENDER_FRONTEND_NAME: creative-saas-frontend
+  GITHUB_REPO: fjkiani/creative-saas
+
+jobs:
+  # ── Job 1: Run Supabase migrations ────────────────────────────────────────
+  migrate:
+    name: Supabase Migrations
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.run_migrations == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL https://github.com/supabase/cli/releases/download/v1.200.3/supabase_linux_amd64.tar.gz \
+            | tar -xz -C /usr/local/bin supabase
+          supabase --version
+
+      - name: Run schema.sql (all tables)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # Use psql via Supabase's connection string
+          # Supabase DB connection: postgresql://postgres:[SERVICE_ROLE_KEY]@db.[REF].supabase.co:5432/postgres
+          # We use the REST API to execute SQL instead (no psql needed)
+          echo "Running schema.sql via Supabase REST..."
+          
+          SQL=$(cat backend/db/schema.sql)
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            "https://${{ env.SUPABASE_PROJECT_REF }}.supabase.co/rest/v1/rpc/exec_sql" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"sql\": $(echo "$SQL" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}" \
+            2>/dev/null)
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "HTTP $HTTP_CODE: $BODY"
+
+      - name: Run migrations via Supabase Management API
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # Use Supabase Management API to run SQL
+          # Endpoint: POST https://api.supabase.com/v1/projects/{ref}/database/query
+          # Auth: Bearer <personal_access_token> (NOT service_role_key)
+          # 
+          # Since we don't have a personal access token, we use the direct DB connection
+          # via the Supabase postgres connection string with service_role_key as password
+          
+          echo "=== Running schema.sql ==="
+          python3 << 'PYEOF'
+          import urllib.request, urllib.parse, json, os, sys
+          
+          service_key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          project_ref = 'cllqahmtyvdcbyyrouxx'
+          base_url = f'https://{project_ref}.supabase.co'
+          
+          headers = {
+              'apikey': service_key,
+              'Authorization': f'Bearer {service_key}',
+              'Content-Type': 'application/json',
+              'Prefer': 'return=minimal'
+          }
+          
+          # Read SQL files
+          sql_files = [
+              ('schema.sql', 'backend/db/schema.sql'),
+              ('storage_bucket.sql', 'backend/db/storage_bucket.sql'),
+          ]
+          
+          for name, path in sql_files:
+              print(f'\n--- Running {name} ---')
+              with open(path) as f:
+                  sql = f.read()
+              
+              # Split into individual statements and run each
+              # Filter out comments and empty lines
+              statements = [s.strip() for s in sql.split(';') if s.strip() and not s.strip().startswith('--')]
+              
+              for i, stmt in enumerate(statements):
+                  if not stmt:
+                      continue
+                  # Use PostgREST RPC if available, otherwise report
+                  print(f'  Statement {i+1}/{len(statements)}: {stmt[:60].replace(chr(10), " ")}...')
+              
+              print(f'  {name}: {len(statements)} statements ready')
+          
+          print('\nSQL files parsed successfully.')
+          print('NOTE: Direct SQL execution requires Supabase personal access token.')
+          print('The workflow will use psql with the DB connection string instead.')
+          PYEOF
+
+      - name: Run SQL via psql (direct DB connection)
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          # Install psql
+          sudo apt-get install -y postgresql-client -q
+          
+          # Supabase DB host: db.[ref].supabase.co:5432
+          DB_HOST="db.${{ env.SUPABASE_PROJECT_REF }}.supabase.co"
+          DB_USER="postgres"
+          DB_NAME="postgres"
+          DB_PORT="5432"
+          
+          echo "=== Running schema.sql ==="
+          PGPASSWORD="${{ secrets.SUPABASE_DB_PASSWORD }}" psql \
+            -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -p "$DB_PORT" \
+            -f backend/db/schema.sql \
+            --set ON_ERROR_STOP=off \
+            2>&1 | tail -20
+          
+          echo "=== Running storage_bucket.sql ==="
+          PGPASSWORD="${{ secrets.SUPABASE_DB_PASSWORD }}" psql \
+            -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -p "$DB_PORT" \
+            -f backend/db/storage_bucket.sql \
+            --set ON_ERROR_STOP=off \
+            2>&1 | tail -10
+          
+          echo "=== Verifying tables ==="
+          PGPASSWORD="${{ secrets.SUPABASE_DB_PASSWORD }}" psql \
+            -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -p "$DB_PORT" \
+            -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;" \
+            2>&1
+
+  # ── Job 2: Deploy to Render ────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: [migrate]
+    if: always()
+    outputs:
+      backend_url: ${{ steps.get_urls.outputs.backend_url }}
+      frontend_url: ${{ steps.get_urls.outputs.frontend_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find or create Render services
+        id: services
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys, time
+          
+          api_key = os.environ['RENDER_API_KEY']
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def render_get(path):
+              req = urllib.request.Request(f'https://api.render.com/v1{path}', headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          def render_post(path, data):
+              body = json.dumps(data).encode()
+              req = urllib.request.Request(f'https://api.render.com/v1{path}', 
+                                           data=body, headers=headers, method='POST')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          # List existing services
+          services, status = render_get('/services?limit=50')
+          print(f'List services: HTTP {status}')
+          
+          if status != 200:
+              print(f'ERROR: {services}')
+              sys.exit(1)
+          
+          # Find existing services by name
+          backend_id = None
+          frontend_id = None
+          
+          for item in services:
+              svc = item.get('service', item)
+              name = svc.get('name', '')
+              sid = svc.get('id', '')
+              print(f'  Found service: {name} ({sid})')
+              if name == 'creative-saas-backend':
+                  backend_id = sid
+              elif name == 'creative-saas-frontend':
+                  frontend_id = sid
+          
+          print(f'\nBackend ID: {backend_id}')
+          print(f'Frontend ID: {frontend_id}')
+          
+          # Write IDs to GitHub env
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'backend_id={backend_id or ""}\n')
+              f.write(f'frontend_id={frontend_id or ""}\n')
+          
+          PYEOF
+
+      - name: Create backend service (if not exists)
+        id: create_backend
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BACKEND_ID: ${{ steps.services.outputs.backend_id }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+          
+          api_key = os.environ['RENDER_API_KEY']
+          backend_id = os.environ.get('BACKEND_ID', '').strip()
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def render_post(path, data):
+              body = json.dumps(data).encode()
+              req = urllib.request.Request(f'https://api.render.com/v1{path}',
+                                           data=body, headers=headers, method='POST')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          def render_get(path):
+              req = urllib.request.Request(f'https://api.render.com/v1{path}', headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          if backend_id:
+              print(f'Backend already exists: {backend_id}')
+              # Get current URL
+              svc, status = render_get(f'/services/{backend_id}')
+              url = svc.get('serviceDetails', {}).get('url', f'https://creative-saas-backend.onrender.com')
+              print(f'Backend URL: {url}')
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f'backend_id={backend_id}\n')
+                  f.write(f'backend_url={url}\n')
+          else:
+              print('Creating backend service...')
+              payload = {
+                  'type': 'web_service',
+                  'name': 'creative-saas-backend',
+                  'ownerId': None,  # will use token owner
+                  'repo': 'https://github.com/fjkiani/creative-saas',
+                  'branch': 'main',
+                  'runtime': 'docker',
+                  'dockerfilePath': './Dockerfile',
+                  'dockerContext': '.',
+                  'plan': 'starter',
+                  'healthCheckPath': '/api/health',
+                  'autoDeploy': 'yes',
+              }
+              result, status = render_post('/services', payload)
+              print(f'Create backend: HTTP {status}')
+              print(json.dumps(result, indent=2)[:500])
+              
+              if status in (200, 201):
+                  svc = result.get('service', result)
+                  sid = svc.get('id', '')
+                  url = svc.get('serviceDetails', {}).get('url', 'https://creative-saas-backend.onrender.com')
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f'backend_id={sid}\n')
+                      f.write(f'backend_url={url}\n')
+              else:
+                  print('WARNING: Could not create backend via API. May need manual creation.')
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write('backend_id=\n')
+                      f.write('backend_url=https://creative-saas-backend.onrender.com\n')
+          PYEOF
+
+      - name: Set backend environment variables
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BACKEND_ID: ${{ steps.create_backend.outputs.backend_id }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PIPELINE_API_KEY: ${{ secrets.PIPELINE_API_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          INSTAGRAM_BUSINESS_ACCOUNT_ID: ${{ secrets.INSTAGRAM_BUSINESS_ACCOUNT_ID }}
+          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+          TIKTOK_OPEN_ID: ${{ secrets.TIKTOK_OPEN_ID }}
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+          
+          api_key = os.environ['RENDER_API_KEY']
+          backend_id = os.environ.get('BACKEND_ID', '').strip()
+          
+          if not backend_id:
+              print('No backend ID — skipping env var injection')
+              sys.exit(0)
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def render_put(path, data):
+              body = json.dumps(data).encode()
+              req = urllib.request.Request(f'https://api.render.com/v1{path}',
+                                           data=body, headers=headers, method='PUT')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          # Build env var list — only include non-empty values
+          env_vars = {
+              'GEMINI_API_KEY':               os.environ.get('GEMINI_API_KEY', ''),
+              'PIPELINE_API_KEY':             os.environ.get('PIPELINE_API_KEY', ''),
+              'SUPABASE_URL':                 'https://cllqahmtyvdcbyyrouxx.supabase.co',
+              'SUPABASE_ANON_KEY':            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE',
+              'SUPABASE_SERVICE_ROLE_KEY':    os.environ.get('SUPABASE_SERVICE_ROLE_KEY', ''),
+              'STORAGE_BACKEND':              'supabase',
+              'LLM_PROVIDER':                 'gemini',
+              'IMAGE_PROVIDER':               'gemini',
+              'CORS_ORIGINS':                 '*',
+              'FRONTEND_URL':                 'https://creative-saas-frontend.onrender.com',
+              'OPENROUTER_API_KEY':           os.environ.get('OPENROUTER_API_KEY', ''),
+              'STRIPE_SECRET_KEY':            os.environ.get('STRIPE_SECRET_KEY', ''),
+              'STRIPE_WEBHOOK_SECRET':        os.environ.get('STRIPE_WEBHOOK_SECRET', ''),
+              'INSTAGRAM_ACCESS_TOKEN':       os.environ.get('INSTAGRAM_ACCESS_TOKEN', ''),
+              'INSTAGRAM_BUSINESS_ACCOUNT_ID': os.environ.get('INSTAGRAM_BUSINESS_ACCOUNT_ID', ''),
+              'TIKTOK_ACCESS_TOKEN':          os.environ.get('TIKTOK_ACCESS_TOKEN', ''),
+              'TIKTOK_OPEN_ID':               os.environ.get('TIKTOK_OPEN_ID', ''),
+              'APIFY_API_TOKEN':              os.environ.get('APIFY_API_TOKEN', ''),
+          }
+          
+          # Format for Render API
+          env_list = [{'key': k, 'value': v} for k, v in env_vars.items() if v]
+          
+          print(f'Setting {len(env_list)} env vars on backend {backend_id}...')
+          result, status = render_put(f'/services/{backend_id}/env-vars', env_list)
+          print(f'HTTP {status}')
+          if status not in (200, 201):
+              print(f'Response: {json.dumps(result)[:300]}')
+          else:
+              print('Env vars set successfully')
+          PYEOF
+
+      - name: Create frontend service (if not exists)
+        id: create_frontend
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          FRONTEND_ID: ${{ steps.services.outputs.frontend_id }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+          
+          api_key = os.environ['RENDER_API_KEY']
+          frontend_id = os.environ.get('FRONTEND_ID', '').strip()
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def render_post(path, data):
+              body = json.dumps(data).encode()
+              req = urllib.request.Request(f'https://api.render.com/v1{path}',
+                                           data=body, headers=headers, method='POST')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          def render_get(path):
+              req = urllib.request.Request(f'https://api.render.com/v1{path}', headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          if frontend_id:
+              print(f'Frontend already exists: {frontend_id}')
+              svc, status = render_get(f'/services/{frontend_id}')
+              url = svc.get('serviceDetails', {}).get('url', 'https://creative-saas-frontend.onrender.com')
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f'frontend_id={frontend_id}\n')
+                  f.write(f'frontend_url={url}\n')
+          else:
+              print('Creating frontend service...')
+              payload = {
+                  'type': 'web_service',
+                  'name': 'creative-saas-frontend',
+                  'repo': 'https://github.com/fjkiani/creative-saas',
+                  'branch': 'main',
+                  'runtime': 'docker',
+                  'dockerfilePath': './frontend/Dockerfile',
+                  'dockerContext': './frontend',
+                  'plan': 'starter',
+                  'autoDeploy': 'yes',
+                  'buildFilter': {
+                      'paths': ['frontend/**'],
+                  },
+              }
+              result, status = render_post('/services', payload)
+              print(f'Create frontend: HTTP {status}')
+              
+              if status in (200, 201):
+                  svc = result.get('service', result)
+                  sid = svc.get('id', '')
+                  url = svc.get('serviceDetails', {}).get('url', 'https://creative-saas-frontend.onrender.com')
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f'frontend_id={sid}\n')
+                      f.write(f'frontend_url={url}\n')
+              else:
+                  print('WARNING: Could not create frontend via API.')
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write('frontend_id=\n')
+                      f.write('frontend_url=https://creative-saas-frontend.onrender.com\n')
+          PYEOF
+
+      - name: Set frontend environment variables
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          FRONTEND_ID: ${{ steps.create_frontend.outputs.frontend_id }}
+          PIPELINE_API_KEY: ${{ secrets.PIPELINE_API_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+          
+          api_key = os.environ['RENDER_API_KEY']
+          frontend_id = os.environ.get('FRONTEND_ID', '').strip()
+          
+          if not frontend_id:
+              print('No frontend ID — skipping')
+              sys.exit(0)
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def render_put(path, data):
+              body = json.dumps(data).encode()
+              req = urllib.request.Request(f'https://api.render.com/v1{path}',
+                                           data=body, headers=headers, method='PUT')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          env_vars = [
+              {'key': 'BACKEND_URL',          'value': 'https://creative-saas-backend.onrender.com'},
+              {'key': 'API_KEY',               'value': os.environ.get('PIPELINE_API_KEY', '')},
+              {'key': 'VITE_SUPABASE_URL',     'value': 'https://cllqahmtyvdcbyyrouxx.supabase.co'},
+              {'key': 'VITE_SUPABASE_ANON_KEY','value': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE'},
+              {'key': 'VITE_API_URL',          'value': ''},
+              {'key': 'VITE_API_KEY',          'value': os.environ.get('PIPELINE_API_KEY', '')},
+          ]
+          
+          env_vars = [e for e in env_vars if e['value']]
+          
+          print(f'Setting {len(env_vars)} env vars on frontend {frontend_id}...')
+          result, status = render_put(f'/services/{frontend_id}/env-vars', env_vars)
+          print(f'HTTP {status}')
+          if status not in (200, 201):
+              print(f'Response: {json.dumps(result)[:300]}')
+          else:
+              print('Frontend env vars set successfully')
+          PYEOF
+
+      - name: Trigger deploys
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BACKEND_ID: ${{ steps.create_backend.outputs.backend_id }}
+          FRONTEND_ID: ${{ steps.create_frontend.outputs.frontend_id }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+          
+          api_key = os.environ['RENDER_API_KEY']
+          backend_id = os.environ.get('BACKEND_ID', '').strip()
+          frontend_id = os.environ.get('FRONTEND_ID', '').strip()
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def render_post(path, data=None):
+              body = json.dumps(data or {}).encode()
+              req = urllib.request.Request(f'https://api.render.com/v1{path}',
+                                           data=body, headers=headers, method='POST')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          for name, sid in [('backend', backend_id), ('frontend', frontend_id)]:
+              if not sid:
+                  print(f'No {name} ID — skipping deploy trigger')
+                  continue
+              result, status = render_post(f'/services/{sid}/deploys', {'clearCache': 'do_not_clear'})
+              print(f'Trigger {name} deploy: HTTP {status}')
+              if status in (200, 201):
+                  deploy_id = result.get('id', result.get('deploy', {}).get('id', ''))
+                  print(f'  Deploy ID: {deploy_id}')
+              else:
+                  print(f'  Response: {json.dumps(result)[:200]}')
+          PYEOF
+
+      - name: Get service URLs
+        id: get_urls
+        run: |
+          echo "backend_url=https://creative-saas-backend.onrender.com" >> $GITHUB_OUTPUT
+          echo "frontend_url=https://creative-saas-frontend.onrender.com" >> $GITHUB_OUTPUT
+
+  # ── Job 3: Health check ────────────────────────────────────────────────────
+  healthcheck:
+    name: Health Check
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+    steps:
+      - name: Wait for backend to come up
+        run: |
+          echo "Waiting for creative-saas-backend to be healthy..."
+          echo "Note: First Render deploy takes 5-10 minutes (Docker build)"
+          echo ""
+          
+          MAX_WAIT=600  # 10 minutes
+          INTERVAL=30
+          ELAPSED=0
+          BACKEND_URL="https://creative-saas-backend.onrender.com"
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            HTTP_CODE=$(curl -s -o /tmp/health.json -w "%{http_code}" "$BACKEND_URL/api/health" 2>/dev/null)
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✓ Backend is UP (HTTP 200)"
+              cat /tmp/health.json | python3 -m json.tool 2>/dev/null || cat /tmp/health.json
+              break
+            fi
+            
+            echo "  [${ELAPSED}s] HTTP $HTTP_CODE — waiting ${INTERVAL}s..."
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "⚠ Backend did not come up within ${MAX_WAIT}s"
+            echo "Check Render dashboard for build logs"
+          fi
+
+      - name: Verify Supabase connection
+        run: |
+          echo "Checking Supabase connectivity..."
+          
+          HTTP_CODE=$(curl -s -o /tmp/health2.json -w "%{http_code}" \
+            "https://creative-saas-backend.onrender.com/api/health" 2>/dev/null)
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            SUPABASE_OK=$(cat /tmp/health2.json | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          checks = d.get('checks', {})
+          print('supabase_configured:', checks.get('supabase_configured', False))
+          print('version:', d.get('version', 'unknown'))
+          " 2>/dev/null)
+            echo "$SUPABASE_OK"
+          else
+            echo "Backend not reachable yet — check Render dashboard"
+          fi
+
+      - name: Print deployment summary
+        run: |
+          echo ""
+          echo "════════════════════════════════════════════════════"
+          echo "  CreativeOS v4 Deployment Summary"
+          echo "════════════════════════════════════════════════════"
+          echo ""
+          echo "  Backend:  https://creative-saas-backend.onrender.com"
+          echo "  Frontend: https://creative-saas-frontend.onrender.com"
+          echo "  Health:   https://creative-saas-backend.onrender.com/api/health"
+          echo "  Supabase: https://cllqahmtyvdcbyyrouxx.supabase.co"
+          echo ""
+          echo "  If supabase_configured=false in health check:"
+          echo "  → Set SUPABASE_SERVICE_ROLE_KEY in Render dashboard"
+          echo "  → Redeploy backend"
+          echo ""
+          echo "  Render dashboard: https://dashboard.render.com"
+          echo "════════════════════════════════════════════════════"

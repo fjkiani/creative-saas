@@ -1,0 +1,138 @@
+name: Render Deploy (Blueprint)
+
+# This workflow triggers a Render Blueprint sync, which reads render.yaml
+# and creates/updates both services automatically.
+# Simpler than the full deploy.yml — use this if services don't exist yet.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - 'render.yaml'
+
+# ── Required GitHub Secrets ────────────────────────────────────────────────────
+# RENDER_API_KEY        — https://dashboard.render.com/u/settings → API Keys
+# RENDER_OWNER_ID       — your Render user/team ID (from dashboard URL or API)
+# GEMINI_API_KEY        — your Gemini API key
+# SUPABASE_SERVICE_ROLE_KEY — Supabase project service role key
+# PIPELINE_API_KEY      — any strong random string
+# ──────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  deploy:
+    name: Deploy via Render API
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_OWNER_ID: ${{ secrets.RENDER_OWNER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PIPELINE_API_KEY: ${{ secrets.PIPELINE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys, time
+          
+          api_key = os.environ['RENDER_API_KEY']
+          owner_id = os.environ.get('RENDER_OWNER_ID', '')
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def api(method, path, data=None):
+              body = json.dumps(data).encode() if data else None
+              req = urllib.request.Request(
+                  f'https://api.render.com/v1{path}',
+                  data=body, headers=headers, method=method
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          # ── Step 1: List existing services ──────────────────────────────────
+          services, status = api('GET', '/services?limit=50')
+          print(f'List services: HTTP {status}')
+          
+          service_map = {}
+          for item in (services if isinstance(services, list) else []):
+              svc = item.get('service', item)
+              service_map[svc.get('name', '')] = svc.get('id', '')
+          
+          print(f'Existing services: {list(service_map.keys())}')
+          
+          backend_id = service_map.get('creative-saas-backend', '')
+          frontend_id = service_map.get('creative-saas-frontend', '')
+          
+          # ── Step 2: Update env vars on existing services ─────────────────────
+          backend_env = [
+              {'key': 'GEMINI_API_KEY',            'value': os.environ.get('GEMINI_API_KEY', '')},
+              {'key': 'PIPELINE_API_KEY',           'value': os.environ.get('PIPELINE_API_KEY', '')},
+              {'key': 'SUPABASE_URL',               'value': 'https://cllqahmtyvdcbyyrouxx.supabase.co'},
+              {'key': 'SUPABASE_ANON_KEY',          'value': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE'},
+              {'key': 'SUPABASE_SERVICE_ROLE_KEY',  'value': os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')},
+              {'key': 'STORAGE_BACKEND',            'value': 'supabase'},
+              {'key': 'LLM_PROVIDER',               'value': 'gemini'},
+              {'key': 'IMAGE_PROVIDER',             'value': 'gemini'},
+              {'key': 'CORS_ORIGINS',               'value': '*'},
+              {'key': 'FRONTEND_URL',               'value': 'https://creative-saas-frontend.onrender.com'},
+              {'key': 'OPENROUTER_API_KEY',         'value': os.environ.get('OPENROUTER_API_KEY', '')},
+          ]
+          backend_env = [e for e in backend_env if e['value']]
+          
+          frontend_env = [
+              {'key': 'BACKEND_URL',           'value': 'https://creative-saas-backend.onrender.com'},
+              {'key': 'API_KEY',               'value': os.environ.get('PIPELINE_API_KEY', '')},
+              {'key': 'VITE_SUPABASE_URL',     'value': 'https://cllqahmtyvdcbyyrouxx.supabase.co'},
+              {'key': 'VITE_SUPABASE_ANON_KEY','value': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE'},
+              {'key': 'VITE_API_URL',          'value': ''},
+              {'key': 'VITE_API_KEY',          'value': os.environ.get('PIPELINE_API_KEY', '')},
+          ]
+          frontend_env = [e for e in frontend_env if e['value']]
+          
+          for name, sid, env_list in [
+              ('backend', backend_id, backend_env),
+              ('frontend', frontend_id, frontend_env),
+          ]:
+              if not sid:
+                  print(f'\n{name}: not found — will be created by Blueprint on first push')
+                  continue
+              
+              print(f'\nSetting {len(env_list)} env vars on {name} ({sid})...')
+              result, status = api('PUT', f'/services/{sid}/env-vars', env_list)
+              print(f'  HTTP {status}')
+              
+              # Trigger redeploy
+              result, status = api('POST', f'/services/{sid}/deploys', {'clearCache': 'do_not_clear'})
+              print(f'  Trigger deploy: HTTP {status}')
+              if status in (200, 201):
+                  deploy = result if isinstance(result, dict) else {}
+                  print(f'  Deploy ID: {deploy.get("id", "unknown")}')
+          
+          print('\n✓ Done. Check https://dashboard.render.com for deploy progress.')
+          PYEOF
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "Deployment triggered. Monitor at:"
+          echo "  https://dashboard.render.com"
+          echo ""
+          echo "Health check (available after ~5-10 min build):"
+          echo "  https://creative-saas-backend.onrender.com/api/health"
+          echo ""
+          echo "Frontend:"
+          echo "  https://creative-saas-frontend.onrender.com"
