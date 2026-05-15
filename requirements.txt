@@ -49,3 +49,4 @@ tenacity>=9.0.0              # Retry logic for all API calls
 structlog>=24.4.0            # Structured JSON logging
 rich>=13.9.0                 # CLI output formatting
 scikit-learn>=1.5.0          # k-means color clustering in compliance_post
+psycopg2-binary>=2.9.9  # Direct postgres connection for migrations

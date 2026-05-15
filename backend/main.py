@@ -1150,13 +1150,16 @@ async def get_billing_usage(workspace_id: str):
 @api_router.post("/api/migrate")
 async def run_migrations():
     """
-    Run Supabase schema migrations from the backend.
-    Uses the service_role_key to execute SQL via the Supabase REST API.
-    Protected by X-Api-Key header (same as all other endpoints).
+    Run Supabase schema migrations.
+    Tries multiple approaches:
+    1. Direct psycopg2 via Supabase pooler (needs DB password in SUPABASE_DB_PASSWORD env)
+    2. Supabase Management API (needs PAT in SUPABASE_ACCESS_TOKEN env)
+    3. Returns SQL for manual execution if both fail
     """
     import httpx
     from pathlib import Path
     from backend.config import settings
+    import os
 
     if not settings.supabase_configured:
         raise HTTPException(status_code=503, detail="Supabase not configured")
@@ -1165,59 +1168,91 @@ async def run_migrations():
     service_key = settings.supabase_service_key_resolved
     project_ref = supabase_url.replace("https://", "").replace(".supabase.co", "")
 
-    results = {}
+    db_password = os.getenv("SUPABASE_DB_PASSWORD", "")
+    access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
 
-    # SQL files to run in order
     sql_files = [
         ("schema", Path("/app/backend/db/schema.sql")),
         ("storage_bucket", Path("/app/backend/db/storage_bucket.sql")),
     ]
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        for name, sql_path in sql_files:
-            if not sql_path.exists():
-                results[name] = {"status": "skipped", "reason": "file not found"}
-                continue
+    results = {}
 
-            sql = sql_path.read_text()
-
-            # Use Supabase Management API to execute SQL
-            try:
-                resp = await client.post(
-                    f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
-                    headers={
-                        "Authorization": f"Bearer {service_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"query": sql},
-                )
-                results[name] = {
-                    "status": "ok" if resp.status_code < 400 else "error",
-                    "http_status": resp.status_code,
-                    "response": resp.text[:500] if resp.status_code >= 400 else "executed",
-                }
-            except Exception as e:
-                results[name] = {"status": "error", "error": str(e)[:200]}
-
-    # Verify tables exist
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
-                headers={
-                    "Authorization": f"Bearer {service_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"query": "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"},
+    # Approach 1: psycopg2 via pooler (needs DB password)
+    if db_password:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host="aws-0-us-east-1.pooler.supabase.com",
+                port=6543,
+                dbname="postgres",
+                user=f"postgres.{project_ref}",
+                password=db_password,
+                connect_timeout=15,
+                sslmode="require"
             )
-            if resp.status_code == 200:
-                results["tables"] = resp.json()
-            else:
-                results["tables"] = {"http_status": resp.status_code, "body": resp.text[:200]}
-    except Exception as e:
-        results["tables"] = {"error": str(e)[:200]}
+            conn.autocommit = True
+            cur = conn.cursor()
+            for name, sql_path in sql_files:
+                if not sql_path.exists():
+                    results[name] = {"status": "skipped", "reason": "file not found"}
+                    continue
+                sql = sql_path.read_text()
+                try:
+                    cur.execute(sql)
+                    results[name] = {"status": "ok", "method": "psycopg2"}
+                except Exception as e:
+                    results[name] = {"status": "error", "method": "psycopg2", "error": str(e)[:300]}
+            conn.close()
+            results["method"] = "psycopg2_pooler"
+            return {"migration_results": results}
+        except Exception as e:
+            results["psycopg2_error"] = str(e)[:200]
 
-    return {"migration_results": results}
+    # Approach 2: Supabase Management API (needs PAT)
+    if access_token:
+        async with httpx.AsyncClient(timeout=60) as client:
+            for name, sql_path in sql_files:
+                if not sql_path.exists():
+                    results[name] = {"status": "skipped", "reason": "file not found"}
+                    continue
+                sql = sql_path.read_text()
+                try:
+                    resp = await client.post(
+                        f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                        },
+                        json={"query": sql},
+                    )
+                    results[name] = {
+                        "status": "ok" if resp.status_code < 400 else "error",
+                        "http_status": resp.status_code,
+                        "method": "management_api",
+                    }
+                except Exception as e:
+                    results[name] = {"status": "error", "method": "management_api", "error": str(e)[:200]}
+        results["method"] = "management_api"
+        return {"migration_results": results}
+
+    # Neither credential available — return instructions
+    schema_sql = sql_files[0][1].read_text() if sql_files[0][1].exists() else ""
+    storage_sql = sql_files[1][1].read_text() if sql_files[1][1].exists() else ""
+
+    return {
+        "migration_results": {
+            "status": "credentials_needed",
+            "message": "Set SUPABASE_DB_PASSWORD or SUPABASE_ACCESS_TOKEN env var on Render, then POST /api/migrate again",
+            "options": {
+                "option_a": "Set SUPABASE_DB_PASSWORD = your postgres DB password (from Supabase dashboard → Settings → Database)",
+                "option_b": "Set SUPABASE_ACCESS_TOKEN = your Supabase PAT (from supabase.com/dashboard/account/tokens)",
+                "option_c": "Run SQL manually at https://supabase.com/dashboard/project/cllqahmtyvdcbyyrouxx/sql/new",
+            },
+            "sql_dashboard_url": f"https://supabase.com/dashboard/project/{project_ref}/sql/new",
+            "schema_sql_preview": schema_sql[:500] + "..." if len(schema_sql) > 500 else schema_sql,
+        }
+    }
 
 # ── Static file serving ───────────────────────────────────────────────────────
 
