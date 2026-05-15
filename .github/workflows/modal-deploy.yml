@@ -1,0 +1,198 @@
+name: Deploy Modal Apps (Image + Video)
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'Which Modal app to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options: ['both', 'image', 'video']
+
+# ── Required GitHub Secrets ────────────────────────────────────────────────────
+# MODAL_TOKEN_ID     — from modal.com/settings (token ID, not webhook key)
+# MODAL_TOKEN_SECRET — from modal.com/settings (token secret)
+# HF_TOKEN           — Hugging Face user access token (already set as secret)
+# RENDER_API_KEY     — to update Render env vars after deploy
+# ──────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  deploy-modal:
+    name: Deploy to Modal
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Modal CLI
+        run: pip install modal
+
+      - name: Configure Modal credentials
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          # MODAL_TOKEN_ID = wk-bJRQZ85Dtuaf69FfrylUQU (CLI auth token)
+          modal token set \
+            --token-id "$MODAL_TOKEN_ID" \
+            --token-secret "$MODAL_TOKEN_SECRET"
+
+      - name: Create Modal secret (creativeos-secrets)
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MODAL_KEY_ID: wk-SsYrBKhwaRvX2KVEDCELoZ
+          MODAL_KEY_SECRET: ${{ secrets.MODAL_KEY_SECRET }}
+        run: |
+          # Create/update the Modal secret used by both apps
+          modal secret create creativeos-secrets \
+            HF_TOKEN="$HF_TOKEN" \
+            MODAL_KEY_ID="$MODAL_KEY_ID" \
+            MODAL_KEY_SECRET="$MODAL_KEY_SECRET" \
+            --force 2>/dev/null || \
+          modal secret create creativeos-secrets \
+            HF_TOKEN="$HF_TOKEN" \
+            MODAL_KEY_ID="$MODAL_KEY_ID" \
+            MODAL_KEY_SECRET="$MODAL_KEY_SECRET"
+          echo "Modal secret created/updated."
+
+      - name: Deploy image generation app
+        id: deploy_image
+        if: ${{ github.event.inputs.app == 'image' || github.event.inputs.app == 'both' }}
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          echo "Deploying HunyuanImage-3.0 to Modal..."
+          OUTPUT=$(modal deploy modal_apps/image_gen.py 2>&1)
+          echo "$OUTPUT"
+          
+          # Extract endpoint URL from Modal deploy output
+          IMAGE_URL=$(echo "$OUTPUT" | grep -oP 'https://[a-z0-9-]+\.modal\.run' | head -1)
+          if [ -z "$IMAGE_URL" ]; then
+            # Try alternate pattern
+            IMAGE_URL=$(echo "$OUTPUT" | grep -oP 'https://[^\s]+creativeos-image-gen[^\s]*' | head -1)
+          fi
+          
+          echo "Image endpoint: $IMAGE_URL"
+          echo "image_url=$IMAGE_URL" >> $GITHUB_OUTPUT
+
+      - name: Deploy video generation app
+        id: deploy_video
+        if: ${{ github.event.inputs.app == 'video' || github.event.inputs.app == 'both' }}
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          echo "Deploying Wan2.2-T2V-A14B to Modal..."
+          OUTPUT=$(modal deploy modal_apps/video_gen.py 2>&1)
+          echo "$OUTPUT"
+          
+          VIDEO_URL=$(echo "$OUTPUT" | grep -oP 'https://[a-z0-9-]+\.modal\.run' | head -1)
+          if [ -z "$VIDEO_URL" ]; then
+            VIDEO_URL=$(echo "$OUTPUT" | grep -oP 'https://[^\s]+creativeos-video-gen[^\s]*' | head -1)
+          fi
+          
+          echo "Video endpoint: $VIDEO_URL"
+          echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT
+
+      - name: Update Render env vars with Modal endpoints
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          IMAGE_URL: ${{ steps.deploy_image.outputs.image_url }}
+          VIDEO_URL: ${{ steps.deploy_video.outputs.video_url }}
+          MODAL_KEY_SECRET: ${{ secrets.MODAL_KEY_SECRET }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+          
+          api_key = os.environ['RENDER_API_KEY']
+          image_url = os.environ.get('IMAGE_URL', '').strip()
+          video_url = os.environ.get('VIDEO_URL', '').strip()
+          modal_key_secret = os.environ.get('MODAL_KEY_SECRET', '').strip()
+          
+          headers = {
+              'Authorization': f'Bearer {api_key}',
+              'Content-Type': 'application/json',
+          }
+          
+          def api(method, path, data=None):
+              body = json.dumps(data).encode() if data else None
+              req = urllib.request.Request(
+                  f'https://api.render.com/v1{path}',
+                  data=body, headers=headers, method=method
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read()), r.status
+              except urllib.error.HTTPError as e:
+                  return json.loads(e.read()), e.code
+          
+          # Find backend service
+          services, status = api('GET', '/services?limit=50')
+          backend_id = None
+          for item in (services if isinstance(services, list) else []):
+              svc = item.get('service', item)
+              if svc.get('name') == 'creative-saas-backend':
+                  backend_id = svc.get('id')
+                  break
+          
+          if not backend_id:
+              print('Backend service not found on Render — skipping env var update')
+              sys.exit(0)
+          
+          print(f'Backend service ID: {backend_id}')
+          
+          # Get current env vars
+          current_env, status = api('GET', f'/services/{backend_id}/env-vars')
+          if status != 200:
+              print(f'Could not fetch current env vars: HTTP {status}')
+              current_env = []
+          
+          # Build updated env var list
+          env_map = {}
+          for item in (current_env if isinstance(current_env, list) else []):
+              env_map[item.get('key', '')] = item.get('value', '')
+          
+          # Update with new Modal endpoints
+          if image_url:
+              env_map['MODAL_IMAGE_ENDPOINT'] = image_url
+              print(f'Setting MODAL_IMAGE_ENDPOINT={image_url}')
+          if video_url:
+              env_map['MODAL_VIDEO_ENDPOINT'] = video_url
+              print(f'Setting MODAL_VIDEO_ENDPOINT={video_url}')
+          if modal_key_secret:
+              env_map['MODAL_KEY_SECRET'] = modal_key_secret
+          
+          env_list = [{'key': k, 'value': v} for k, v in env_map.items() if v]
+          
+          result, status = api('PUT', f'/services/{backend_id}/env-vars', env_list)
+          print(f'Update env vars: HTTP {status}')
+          
+          # Trigger redeploy
+          result, status = api('POST', f'/services/{backend_id}/deploys', {'clearCache': 'do_not_clear'})
+          print(f'Trigger redeploy: HTTP {status}')
+          
+          print('\nDone. Backend will redeploy with Modal endpoints.')
+          PYEOF
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "════════════════════════════════════════════════════"
+          echo "  Modal Deployment Summary"
+          echo "════════════════════════════════════════════════════"
+          echo "  Image endpoint: ${{ steps.deploy_image.outputs.image_url }}"
+          echo "  Video endpoint: ${{ steps.deploy_video.outputs.video_url }}"
+          echo ""
+          echo "  Render backend redeploying with new endpoints."
+          echo "  Health check: https://creative-saas-backend.onrender.com/api/health"
+          echo "  Models API:   https://creative-saas-backend.onrender.com/api/models"
+          echo "════════════════════════════════════════════════════"

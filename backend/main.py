@@ -268,10 +268,45 @@ async def health():
         "status": "ok",
         "version": "4.0.0",
         "auth_enabled": bool(_API_KEY),
+        "checks": {
+            "supabase_configured": settings.supabase_configured,
+            "modal_configured": settings.modal_configured,
+            "llm_configured": settings.llm_api_key_configured,
+        },
         "providers": {
             "llm": settings.llm_provider,
+            "llm_model": settings.openrouter_model if settings.llm_provider == "openrouter" else None,
             "image": settings.image_provider,
+            "video": settings.video_provider,
             "storage": settings.storage_backend,
+            "modal_image_endpoint": bool(settings.modal_image_endpoint),
+            "modal_video_endpoint": bool(settings.modal_video_endpoint),
+        },
+    }
+
+
+@public_router.get("/api/models")
+async def list_models():
+    """List all available LLM and image/video models."""
+    from backend.providers.openrouter_llm import FREE_MODEL_CATALOG
+    from backend.providers.modal_image import MODAL_IMAGE_MODELS
+    from backend.providers.modal_video import MODAL_VIDEO_MODELS
+
+    return {
+        "llm": {
+            "active_provider": settings.llm_provider,
+            "active_model": settings.openrouter_model,
+            "free_models": FREE_MODEL_CATALOG,
+        },
+        "image": {
+            "active_provider": settings.image_provider,
+            "modal_models": MODAL_IMAGE_MODELS,
+            "modal_configured": bool(settings.modal_image_endpoint),
+        },
+        "video": {
+            "active_provider": settings.video_provider,
+            "modal_models": MODAL_VIDEO_MODELS,
+            "modal_configured": bool(settings.modal_video_endpoint),
         },
     }
 

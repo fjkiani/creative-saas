@@ -2,7 +2,12 @@
 Abstract base interfaces for LLM and Image providers.
 
 Design pattern: Strategy — swap providers via IMAGE_PROVIDER / LLM_PROVIDER env vars.
-Zero code changes required to switch between Gemini, OpenAI, Firefly, Stability, etc.
+Zero code changes required to switch between providers.
+
+Provider registry:
+  LLM:   openrouter (default) | gemini | openai | anthropic
+  Image: modal (default) | gemini | openai | firefly | stability
+  Video: modal (default) | slideshow | ai | ai_hailuo
 """
 from abc import ABC, abstractmethod
 from pydantic import BaseModel
@@ -57,6 +62,9 @@ def get_llm_provider() -> LLMProvider:
     from backend.config import settings
 
     match settings.llm_provider.lower():
+        case "openrouter":
+            from backend.providers.openrouter_llm import OpenRouterLLMProvider
+            return OpenRouterLLMProvider()
         case "openai":
             from backend.providers.openai_dalle import OpenAILLMProvider
             return OpenAILLMProvider()
@@ -73,6 +81,9 @@ def get_image_provider() -> ImageProvider:
     from backend.config import settings
 
     match settings.image_provider.lower():
+        case "modal":
+            from backend.providers.modal_image import ModalImageProvider
+            return ModalImageProvider()
         case "openai":
             from backend.providers.openai_dalle import OpenAIImageProvider
             return OpenAIImageProvider()

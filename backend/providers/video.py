@@ -367,9 +367,20 @@ class HailuoVideoProvider(WanVideoProvider):
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 
-def get_video_provider(mode: str = "slideshow") -> VideoProvider:
-    """Return the appropriate video provider for the given mode."""
+def get_video_provider(mode: str | None = None) -> VideoProvider:
+    """
+    Return the appropriate video provider.
+    If mode is None, reads VIDEO_PROVIDER env var (set in config).
+    Priority: explicit mode arg > VIDEO_PROVIDER env > slideshow fallback.
+    """
+    if mode is None:
+        from backend.config import settings
+        mode = settings.video_provider
+
     match mode:
+        case "modal":
+            from backend.providers.modal_video import ModalVideoProvider
+            return ModalVideoProvider()
         case "slideshow":
             return SlideshowVideoProvider()
         case "ai":
@@ -378,3 +389,8 @@ def get_video_provider(mode: str = "slideshow") -> VideoProvider:
             return HailuoVideoProvider()
         case _:
             return SlideshowVideoProvider()
+
+
+def get_video_provider_from_config() -> VideoProvider:
+    """Convenience: always reads from settings.video_provider."""
+    return get_video_provider(mode=None)

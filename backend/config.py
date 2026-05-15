@@ -4,7 +4,12 @@ Loaded from .env via pydantic-settings.
 All provider/backend selection happens here via env vars.
 
 v4 additions:
-  - openrouter_api_key: for vision, edit, and AI video providers
+  - openrouter_api_key: for vision, edit, AI video, and free LLM providers
+  - openrouter_model: default free model (nvidia/nemotron-nano-9b-v2)
+  - modal_image_endpoint: HunyuanImage-3.0 endpoint URL
+  - modal_video_endpoint: Wan2.2-T2V-A14B endpoint URL
+  - modal_key_id / modal_key_secret: Modal webhook auth
+  - video_provider: slideshow | modal | ai (OpenRouter Wan)
   - stripe_*: billing and subscriptions
   - instagram_*: Meta Graph API OAuth
   - tiktok_*: TikTok Content Posting API OAuth
@@ -33,21 +38,52 @@ class Settings(BaseSettings):
     )
 
     # ── LLM ─────────────────────────────────────────────────
-    llm_provider: str = Field(default="gemini", description="gemini | openai | anthropic")
+    llm_provider: str = Field(
+        default="openrouter",
+        description="openrouter | gemini | openai | anthropic",
+    )
     gemini_api_key: str = Field(default="")
     openai_api_key: str = Field(default="")
     anthropic_api_key: str = Field(default="")
 
+    # ── OpenRouter (LLM + video + vision) ────────────────────
+    openrouter_api_key: str = Field(
+        default="",
+        description="Required for OpenRouter LLM, canvas editor, competitor analysis, AI video",
+    )
+    openrouter_model: str = Field(
+        default="nvidia/nemotron-nano-9b-v2",
+        description="Default free OpenRouter model. Override per-request via OPENROUTER_MODEL env var.",
+    )
+    edit_provider: str = Field(default="gemini", description="gemini | openai")
+    vision_provider: str = Field(default="llama", description="llama | gemini")
+
     # ── Image Generation ─────────────────────────────────────
-    image_provider: str = Field(default="gemini", description="gemini | openai | firefly | stability")
+    image_provider: str = Field(
+        default="modal",
+        description="modal | gemini | openai | firefly | stability",
+    )
     firefly_client_id: str = Field(default="")
     firefly_client_secret: str = Field(default="")
     stability_api_key: str = Field(default="")
 
-    # ── v4: OpenRouter (vision, edit, AI video) ───────────────
-    openrouter_api_key: str = Field(default="", description="Required for canvas editor, competitor analysis, AI video")
-    edit_provider: str = Field(default="gpt5", description="gpt5 | gemini")
-    vision_provider: str = Field(default="llama", description="llama")
+    # ── Video Generation ─────────────────────────────────────
+    video_provider: str = Field(
+        default="modal",
+        description="modal | slideshow | ai (OpenRouter Wan) | ai_hailuo",
+    )
+
+    # ── Modal (HF model hosting) ──────────────────────────────
+    modal_image_endpoint: str = Field(
+        default="",
+        description="URL of Modal-deployed HunyuanImage endpoint. Empty = fall back to Gemini.",
+    )
+    modal_video_endpoint: str = Field(
+        default="",
+        description="URL of Modal-deployed Wan2.2 endpoint. Empty = fall back to slideshow.",
+    )
+    modal_key_id: str = Field(default="", description="Modal webhook token ID")
+    modal_key_secret: str = Field(default="", description="Modal webhook token secret")
 
     # ── Supabase ─────────────────────────────────────────────
     # Default MUST be empty string — empty triggers LocalDB fallback in client.py.
@@ -74,7 +110,10 @@ class Settings(BaseSettings):
         return bool(url and key and url.startswith("https://"))
 
     # ── Storage ──────────────────────────────────────────────
-    storage_backend: str = Field(default="supabase", description="supabase | s3 | azure | dropbox | local")
+    storage_backend: str = Field(
+        default="supabase",
+        description="supabase | s3 | azure | dropbox | local",
+    )
     aws_access_key_id: str = Field(default="")
     aws_secret_access_key: str = Field(default="")
     aws_region: str = Field(default="us-east-1")
@@ -101,14 +140,23 @@ class Settings(BaseSettings):
     tiktok_redirect_uri: str = Field(default="")
 
     # ── v4: Apify (competitor URL scraping) ───────────────────
-    apify_api_token: str = Field(default="", description="Required for URL-based competitor analysis")
+    apify_api_token: str = Field(
+        default="",
+        description="Required for URL-based competitor analysis",
+    )
 
     # ── App ──────────────────────────────────────────────────
-    pipeline_api_key: str = Field(default="", description="X-Api-Key header value; empty = auth disabled (dev mode)")
+    pipeline_api_key: str = Field(
+        default="",
+        description="X-Api-Key header value; empty = auth disabled (dev mode)",
+    )
     backend_port: int = Field(default=8000)
     cors_origins: str = Field(default="http://localhost:5173")
     log_level: str = Field(default="INFO")
-    frontend_url: str = Field(default="http://localhost:5173", description="Used for Stripe redirect URLs")
+    frontend_url: str = Field(
+        default="http://localhost:5173",
+        description="Used for Stripe redirect URLs",
+    )
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -117,7 +165,17 @@ class Settings(BaseSettings):
     @property
     def llm_api_key_configured(self) -> bool:
         """True if at least one LLM API key is set."""
-        return bool(self.gemini_api_key or self.openai_api_key or self.anthropic_api_key)
+        return bool(
+            self.gemini_api_key
+            or self.openai_api_key
+            or self.anthropic_api_key
+            or self.openrouter_api_key
+        )
+
+    @property
+    def modal_configured(self) -> bool:
+        """True when Modal endpoints and auth are set."""
+        return bool(self.modal_key_id and self.modal_key_secret)
 
 
 @lru_cache(maxsize=1)

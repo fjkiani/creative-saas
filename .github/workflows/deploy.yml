@@ -17,10 +17,13 @@ on:
         options: ['production']
 
 # ── Required GitHub Secrets ────────────────────────────────────────────────────
-# RENDER_API_KEY        — from https://dashboard.render.com/u/settings (API Keys tab)
-# SUPABASE_SERVICE_ROLE_KEY — from https://supabase.com/dashboard/project/cllqahmtyvdcbyyrouxx/settings/api
-# GEMINI_API_KEY        — your Gemini API key
-# PIPELINE_API_KEY      — any strong random string (protects your API)
+# RENDER_API_KEY            — https://dashboard.render.com/u/settings → API Keys
+# SUPABASE_DB_PASSWORD      — Supabase → Settings → Database → Database password
+# SUPABASE_SERVICE_ROLE_KEY — Supabase → Settings → API → service_role key
+# PIPELINE_API_KEY          — auto-generated (already set)
+# OPENROUTER_API_KEY        — openrouter.ai API key (for free LLMs)
+# MODAL_KEY_SECRET          — ws-ei5dSk2n5gcdYNRWtBSdY9
+# GEMINI_API_KEY            — fallback for image reference editing
 # ──────────────────────────────────────────────────────────────────────────────
 
 env:
@@ -321,6 +324,7 @@ jobs:
           PIPELINE_API_KEY: ${{ secrets.PIPELINE_API_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MODAL_KEY_SECRET: ${{ secrets.MODAL_KEY_SECRET }}
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
@@ -356,17 +360,32 @@ jobs:
           
           # Build env var list — only include non-empty values
           env_vars = {
-              'GEMINI_API_KEY':               os.environ.get('GEMINI_API_KEY', ''),
+              # ── Auth ──────────────────────────────────────────────────────────
               'PIPELINE_API_KEY':             os.environ.get('PIPELINE_API_KEY', ''),
+              # ── LLM: OpenRouter free models ───────────────────────────────────
+              'LLM_PROVIDER':                 'openrouter',
+              'OPENROUTER_API_KEY':           os.environ.get('OPENROUTER_API_KEY', ''),
+              'OPENROUTER_MODEL':             'nvidia/nemotron-nano-9b-v2',
+              'OPENROUTER_FALLBACK_MODELS':   'deepseek/deepseek-v4-flash,google/gemma-4-26b-a4b,meta-llama/llama-3.3-70b-instruct',
+              # ── Gemini (fallback for image reference editing) ─────────────────
+              'GEMINI_API_KEY':               os.environ.get('GEMINI_API_KEY', ''),
+              # ── Image: Modal (HunyuanImage-3.0) ──────────────────────────────
+              'IMAGE_PROVIDER':               'modal',
+              'MODAL_IMAGE_ENDPOINT':         '',   # set by modal-deploy.yml after Modal deploy
+              'MODAL_KEY_ID':                 'wk-SsYrBKhwaRvX2KVEDCELoZ',
+              'MODAL_KEY_SECRET':             os.environ.get('MODAL_KEY_SECRET', ''),
+              # ── Video: Modal (Wan2.2-T2V-A14B) ───────────────────────────────
+              'VIDEO_PROVIDER':               'modal',
+              'MODAL_VIDEO_ENDPOINT':         '',   # set by modal-deploy.yml after Modal deploy
+              # ── Supabase ──────────────────────────────────────────────────────
               'SUPABASE_URL':                 'https://cllqahmtyvdcbyyrouxx.supabase.co',
               'SUPABASE_ANON_KEY':            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE',
               'SUPABASE_SERVICE_ROLE_KEY':    os.environ.get('SUPABASE_SERVICE_ROLE_KEY', ''),
               'STORAGE_BACKEND':              'supabase',
-              'LLM_PROVIDER':                 'gemini',
-              'IMAGE_PROVIDER':               'gemini',
+              # ── App ───────────────────────────────────────────────────────────
               'CORS_ORIGINS':                 '*',
               'FRONTEND_URL':                 'https://creative-saas-frontend.onrender.com',
-              'OPENROUTER_API_KEY':           os.environ.get('OPENROUTER_API_KEY', ''),
+              # ── Optional integrations ─────────────────────────────────────────
               'STRIPE_SECRET_KEY':            os.environ.get('STRIPE_SECRET_KEY', ''),
               'STRIPE_WEBHOOK_SECRET':        os.environ.get('STRIPE_WEBHOOK_SECRET', ''),
               'INSTAGRAM_ACCESS_TOKEN':       os.environ.get('INSTAGRAM_ACCESS_TOKEN', ''),

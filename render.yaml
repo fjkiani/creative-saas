@@ -1,4 +1,5 @@
 # Render deployment blueprint — CreativeOS v4 (creative-saas)
+# Providers: OpenRouter (free LLMs) + Modal (HunyuanImage + Wan2.2 video)
 services:
   # ── Backend (FastAPI) ────────────────────────────────────────────────────────
   - type: web
@@ -13,19 +14,36 @@ services:
       - key: PIPELINE_API_KEY
         sync: false
 
-      # ── LLM / Image ──────────────────────────────────────────────────────────
+      # ── LLM: OpenRouter (free models, fallback chain) ─────────────────────────
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: nvidia/nemotron-nano-9b-v2
+      # Fallback chain (comma-separated, tried in order if primary is rate-limited)
+      - key: OPENROUTER_FALLBACK_MODELS
+        value: "deepseek/deepseek-v4-flash,google/gemma-4-26b-a4b,qwen/qwen3-coder-480b-a35b,meta-llama/llama-3.3-70b-instruct"
+
+      # ── Gemini (fallback for image reference editing) ─────────────────────────
       - key: GEMINI_API_KEY
         sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false          # Required for video gen (Wan-2.6, Hailuo) + vision (Llama)
+
+      # ── Image Generation: Modal (HunyuanImage-3.0) ───────────────────────────
       - key: IMAGE_PROVIDER
-        value: gemini
-      - key: LLM_PROVIDER
-        value: gemini
+        value: modal
+      - key: MODAL_IMAGE_ENDPOINT
+        sync: false          # Set after: modal deploy modal_apps/image_gen.py
+      - key: MODAL_KEY_ID
+        value: wk-SsYrBKhwaRvX2KVEDCELoZ
+      - key: MODAL_KEY_SECRET
+        sync: false          # ws-ei5dSk2n5gcdYNRWtBSdY9
+
+      # ── Video Generation: Modal (Wan2.2-T2V-A14B) ────────────────────────────
+      - key: VIDEO_PROVIDER
+        value: modal
+      - key: MODAL_VIDEO_ENDPOINT
+        sync: false          # Set after: modal deploy modal_apps/video_gen.py
 
       # ── Storage ───────────────────────────────────────────────────────────────
       - key: STORAGE_BACKEND
@@ -34,26 +52,24 @@ services:
       # ── Supabase ──────────────────────────────────────────────────────────────
       - key: SUPABASE_URL
         value: https://cllqahmtyvdcbyyrouxx.supabase.co
-      # anon key is public-safe (browser-facing JWT, no elevated privileges)
       - key: SUPABASE_ANON_KEY
         value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE
-      # service_role key — set this manually in Render dashboard, never commit
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
 
       # ── Social Publishing ─────────────────────────────────────────────────────
       - key: INSTAGRAM_ACCESS_TOKEN
-        sync: false          # Meta Graph API long-lived token
+        sync: false
       - key: INSTAGRAM_BUSINESS_ACCOUNT_ID
         sync: false
       - key: TIKTOK_ACCESS_TOKEN
-        sync: false          # TikTok Content Posting API v2
+        sync: false
       - key: TIKTOK_OPEN_ID
         sync: false
 
       # ── Competitor Analysis ───────────────────────────────────────────────────
       - key: APIFY_API_TOKEN
-        sync: false          # For Instagram/TikTok scraping via Apify
+        sync: false
 
       # ── Billing (Stripe) ──────────────────────────────────────────────────────
       - key: STRIPE_SECRET_KEY
@@ -65,7 +81,7 @@ services:
       - key: STRIPE_PRICE_ID_ENTERPRISE
         sync: false
 
-      # ── CORS — allow frontend origin ──────────────────────────────────────────
+      # ── CORS ──────────────────────────────────────────────────────────────────
       - key: CORS_ORIGINS
         value: "*"
 
@@ -77,20 +93,15 @@ services:
     dockerContext: ./frontend
     plan: starter
     buildArgs:
-      # Baked into the Vite bundle at build time (anon key is public-safe)
       - key: VITE_SUPABASE_URL
         value: https://cllqahmtyvdcbyyrouxx.supabase.co
       - key: VITE_SUPABASE_ANON_KEY
         value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsbHFhaG10eXZkY2J5eXJvdXh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwODk2MTAsImV4cCI6MjA5MzY2NTYxMH0.4uAaGn8Hnm2vMp_2rOQHfBEe3jCwlWdz3MAtHs-S7BE
-      # API URL baked into bundle — empty string = use nginx proxy (correct for production)
-      # For local dev, set VITE_API_URL=http://localhost:8000 in frontend/.env.local
       - key: VITE_API_URL
         value: ""
-      # API key baked into bundle — must match PIPELINE_API_KEY on backend
       - key: VITE_API_KEY
         sync: false
     envVars:
-      # Runtime nginx substitution — points to the backend service
       - key: BACKEND_URL
         value: https://creative-saas-backend.onrender.com
       - key: API_KEY
