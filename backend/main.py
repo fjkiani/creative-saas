@@ -1143,6 +1143,82 @@ async def get_billing_usage(workspace_id: str):
     }
 
 
+
+
+# ── Migration endpoint ────────────────────────────────────────────────────────
+
+@api_router.post("/api/migrate")
+async def run_migrations():
+    """
+    Run Supabase schema migrations from the backend.
+    Uses the service_role_key to execute SQL via the Supabase REST API.
+    Protected by X-Api-Key header (same as all other endpoints).
+    """
+    import httpx
+    from pathlib import Path
+    from backend.config import settings
+
+    if not settings.supabase_configured:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    supabase_url = settings.supabase_url.rstrip("/")
+    service_key = settings.supabase_service_key_resolved
+    project_ref = supabase_url.replace("https://", "").replace(".supabase.co", "")
+
+    results = {}
+
+    # SQL files to run in order
+    sql_files = [
+        ("schema", Path("/app/backend/db/schema.sql")),
+        ("storage_bucket", Path("/app/backend/db/storage_bucket.sql")),
+    ]
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for name, sql_path in sql_files:
+            if not sql_path.exists():
+                results[name] = {"status": "skipped", "reason": "file not found"}
+                continue
+
+            sql = sql_path.read_text()
+
+            # Use Supabase Management API to execute SQL
+            try:
+                resp = await client.post(
+                    f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
+                    headers={
+                        "Authorization": f"Bearer {service_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"query": sql},
+                )
+                results[name] = {
+                    "status": "ok" if resp.status_code < 400 else "error",
+                    "http_status": resp.status_code,
+                    "response": resp.text[:500] if resp.status_code >= 400 else "executed",
+                }
+            except Exception as e:
+                results[name] = {"status": "error", "error": str(e)[:200]}
+
+    # Verify tables exist
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
+                headers={
+                    "Authorization": f"Bearer {service_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"query": "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"},
+            )
+            if resp.status_code == 200:
+                results["tables"] = resp.json()
+            else:
+                results["tables"] = {"http_status": resp.status_code, "body": resp.text[:200]}
+    except Exception as e:
+        results["tables"] = {"error": str(e)[:200]}
+
+    return {"migration_results": results}
+
 # ── Static file serving ───────────────────────────────────────────────────────
 
 _OUTPUTS_DIR = Path(os.getenv("OUTPUTS_DIR", "/app/outputs"))
