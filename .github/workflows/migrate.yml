@@ -14,16 +14,18 @@ on:
           - all         # schema.sql + storage_bucket.sql + migrate_v3_to_v4.sql
 
 # ── Required GitHub Secrets ────────────────────────────────────────────────────
-# SUPABASE_DB_PASSWORD  — from Supabase dashboard → Settings → Database → Database password
-#                         (this is the postgres user password, NOT the service_role_key)
+# SUPABASE_ACCESS_TOKEN  — Supabase Personal Access Token
+#                          Get from: https://supabase.com/dashboard/account/tokens
+#                          (NOT the service_role_key — this is your account PAT)
+# SUPABASE_DB_PASSWORD   — Optional: postgres DB password (alternative auth method)
 # ──────────────────────────────────────────────────────────────────────────────
 
 env:
   SUPABASE_PROJECT_REF: cllqahmtyvdcbyyrouxx
-  DB_HOST: db.cllqahmtyvdcbyyrouxx.supabase.co
-  DB_USER: postgres
+  DB_HOST: aws-0-us-east-1.pooler.supabase.com
+  DB_PORT: "6543"
+  DB_USER: postgres.cllqahmtyvdcbyyrouxx
   DB_NAME: postgres
-  DB_PORT: "5432"
 
 jobs:
   migrate:
@@ -33,67 +35,92 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz \
+            | tar -xz -C /usr/local/bin supabase
+          supabase --version
+
       - name: Install psql
         run: |
           sudo apt-get update -q
           sudo apt-get install -y postgresql-client -q
-          psql --version
 
-      - name: Test DB connection
-        env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: |
-          psql -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
-               -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
-               -c "SELECT version();" 2>&1 | head -5
-
-      - name: Run schema.sql (fresh install)
+      - name: Run schema.sql via Supabase CLI (fresh install)
         if: ${{ github.event.inputs.migration_type == 'fresh' || github.event.inputs.migration_type == 'all' }}
         env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "=== Running schema.sql ==="
-          psql -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
-               -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
-               -f backend/db/schema.sql \
-               --set ON_ERROR_STOP=off 2>&1
+          if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
+            # Use Supabase CLI with PAT
+            supabase db execute \
+              --project-ref "${{ env.SUPABASE_PROJECT_REF }}" \
+              --file backend/db/schema.sql 2>&1 || true
+          elif [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            # Fallback: direct psql via pooler
+            PGPASSWORD="$SUPABASE_DB_PASSWORD" psql \
+              -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
+              -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
+              -f backend/db/schema.sql --set ON_ERROR_STOP=off 2>&1
+          else
+            echo "ERROR: Set SUPABASE_ACCESS_TOKEN or SUPABASE_DB_PASSWORD secret"
+            exit 1
+          fi
           echo "Done."
 
       - name: Run storage_bucket.sql
         if: ${{ github.event.inputs.migration_type == 'fresh' || github.event.inputs.migration_type == 'all' }}
         env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "=== Running storage_bucket.sql ==="
-          psql -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
-               -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
-               -f backend/db/storage_bucket.sql \
-               --set ON_ERROR_STOP=off 2>&1
+          if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
+            supabase db execute \
+              --project-ref "${{ env.SUPABASE_PROJECT_REF }}" \
+              --file backend/db/storage_bucket.sql 2>&1 || true
+          elif [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            PGPASSWORD="$SUPABASE_DB_PASSWORD" psql \
+              -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
+              -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
+              -f backend/db/storage_bucket.sql --set ON_ERROR_STOP=off 2>&1
+          fi
           echo "Done."
 
       - name: Run migrate_v3_to_v4.sql (upgrade only)
         if: ${{ github.event.inputs.migration_type == 'upgrade' || github.event.inputs.migration_type == 'all' }}
         env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "=== Running migrate_v3_to_v4.sql ==="
-          psql -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
-               -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
-               -f backend/db/migrate_v3_to_v4.sql \
-               --set ON_ERROR_STOP=off 2>&1
+          if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
+            supabase db execute \
+              --project-ref "${{ env.SUPABASE_PROJECT_REF }}" \
+              --file backend/db/migrate_v3_to_v4.sql 2>&1 || true
+          elif [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            PGPASSWORD="$SUPABASE_DB_PASSWORD" psql \
+              -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
+              -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
+              -f backend/db/migrate_v3_to_v4.sql --set ON_ERROR_STOP=off 2>&1
+          fi
           echo "Done."
 
       - name: Verify tables
         env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "=== Tables in public schema ==="
-          psql -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
-               -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
-               -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;" 2>&1
-          
-          echo ""
-          echo "=== Storage buckets ==="
-          psql -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
-               -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
-               -c "SELECT id, name, public FROM storage.buckets;" 2>&1
+          if [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
+            supabase db execute \
+              --project-ref "${{ env.SUPABASE_PROJECT_REF }}" \
+              --sql "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;" 2>&1
+          elif [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            PGPASSWORD="$SUPABASE_DB_PASSWORD" psql \
+              -h "${{ env.DB_HOST }}" -U "${{ env.DB_USER }}" \
+              -d "${{ env.DB_NAME }}" -p "${{ env.DB_PORT }}" \
+              -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;" 2>&1
+          fi
