@@ -1,0 +1,158 @@
+name: Run Supabase Migrations (JS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_type:
+        description: 'Which migrations to run'
+        required: true
+        default: 'fresh'
+        type: choice
+        options: [fresh, upgrade, all, verify]
+
+jobs:
+  migrate:
+    name: Migrate via Supabase JS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install @supabase/supabase-js
+
+      - name: Run migrations
+        env:
+          SUPABASE_URL: https://cllqahmtyvdcbyyrouxx.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MIGRATION_TYPE: ${{ github.event.inputs.migration_type }}
+        run: |
+          node << 'JSEOF'
+          const { createClient } = require('@supabase/supabase-js');
+          const fs = require('fs');
+          const https = require('https');
+
+          const SUPABASE_URL = process.env.SUPABASE_URL;
+          const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+          const MIGRATION_TYPE = process.env.MIGRATION_TYPE || 'fresh';
+          const PROJECT_REF = 'cllqahmtyvdcbyyrouxx';
+
+          // Use the pg_meta API (internal Supabase API used by dashboard)
+          // This accepts the service_role_key and can execute arbitrary SQL
+          async function execSQL(sql, label) {
+            return new Promise((resolve, reject) => {
+              const body = JSON.stringify({ query: sql });
+              const options = {
+                hostname: `${PROJECT_REF}.supabase.co`,
+                path: '/rest/v1/rpc/exec_sql',
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                  'apikey': SERVICE_ROLE_KEY,
+                  'Content-Type': 'application/json',
+                  'Content-Length': Buffer.byteLength(body),
+                }
+              };
+              const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', d => data += d);
+                res.on('end', () => {
+                  console.log(`${label}: HTTP ${res.statusCode}`);
+                  if (res.statusCode >= 400) {
+                    console.log('Response:', data.substring(0, 200));
+                  }
+                  resolve({ status: res.statusCode, data });
+                });
+              });
+              req.on('error', reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          // Alternative: use the Supabase Management API
+          async function execSQLMgmt(sql, label) {
+            return new Promise((resolve, reject) => {
+              const body = JSON.stringify({ query: sql });
+              const options = {
+                hostname: 'api.supabase.com',
+                path: `/v1/projects/${PROJECT_REF}/database/query`,
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                  'Content-Type': 'application/json',
+                  'Content-Length': Buffer.byteLength(body),
+                }
+              };
+              const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', d => data += d);
+                res.on('end', () => {
+                  console.log(`${label}: HTTP ${res.statusCode}`);
+                  if (data) console.log('Response:', data.substring(0, 300));
+                  resolve({ status: res.statusCode, data });
+                });
+              });
+              req.on('error', reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          async function main() {
+            console.log('Migration type:', MIGRATION_TYPE);
+            console.log('Project:', PROJECT_REF);
+            
+            // Test connection
+            const test = await execSQLMgmt('SELECT version();', 'version check');
+            if (test.status === 200) {
+              console.log('✅ Management API works!');
+            } else {
+              console.log('⚠️  Management API returned', test.status, '- trying REST API...');
+              const test2 = await execSQL('SELECT 1;', 'REST test');
+              console.log('REST API status:', test2.status);
+            }
+
+            if (MIGRATION_TYPE === 'verify') {
+              const r = await execSQLMgmt(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;",
+                'list tables'
+              );
+              return;
+            }
+
+            const files = [];
+            if (MIGRATION_TYPE === 'fresh' || MIGRATION_TYPE === 'all') {
+              files.push('backend/db/schema.sql', 'backend/db/storage_bucket.sql');
+            }
+            if (MIGRATION_TYPE === 'upgrade' || MIGRATION_TYPE === 'all') {
+              files.push('backend/db/migrate_v3_to_v4.sql');
+            }
+
+            for (const file of files) {
+              if (!fs.existsSync(file)) {
+                console.log(`SKIP: ${file} not found`);
+                continue;
+              }
+              const sql = fs.readFileSync(file, 'utf8');
+              console.log(`\n=== Running ${file} (${sql.length} chars) ===`);
+              const r = await execSQLMgmt(sql, file);
+              if (r.status === 200) {
+                console.log(`✅ ${file} done`);
+              } else {
+                console.log(`⚠️  ${file} returned HTTP ${r.status}`);
+              }
+            }
+
+            // Verify
+            console.log('\n=== Final table list ===');
+            await execSQLMgmt(
+              "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;",
+              'final verify'
+            );
+          }
+
+          main().catch(e => { console.error(e); process.exit(1); });
+          JSEOF
