@@ -264,11 +264,15 @@ async def resume_pipeline_background(run_id: str, decision: str, reviewer_notes:
 
 @public_router.get("/api/health")
 async def health():
+    from backend.db.client import using_local_db
+    db_mode = "sqlite" if using_local_db() else "supabase"
     return {
         "status": "ok",
         "version": "4.0.0",
         "auth_enabled": bool(_API_KEY),
         "checks": {
+            "db_configured": True,
+            "db_mode": db_mode,
             "supabase_configured": settings.supabase_configured,
             "modal_configured": settings.modal_configured,
             "llm_configured": settings.llm_api_key_configured,
