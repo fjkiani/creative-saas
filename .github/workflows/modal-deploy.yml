@@ -38,10 +38,12 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          # MODAL_TOKEN_ID = wk-bJRQZ85Dtuaf69FfrylUQU (CLI auth token)
-          modal token set \
-            --token-id "$MODAL_TOKEN_ID" \
-            --token-secret "$MODAL_TOKEN_SECRET"
+          # Modal CLI reads MODAL_TOKEN_ID and MODAL_TOKEN_SECRET from environment
+          # These are set as GitHub secrets (wk-bJRQZ85Dtuaf69FfrylUQU / ws-byetyyYDftdpZD49S2vInp)
+          echo "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" >> $GITHUB_ENV
+          echo "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" >> $GITHUB_ENV
+          # Verify modal can authenticate
+          modal profile list 2>&1 || echo "Profile list failed — will try deploy anyway"
 
       - name: Create Modal secret (creativeos-secrets)
         env:
@@ -52,15 +54,12 @@ jobs:
           MODAL_KEY_SECRET: ${{ secrets.MODAL_KEY_SECRET }}
         run: |
           # Create/update the Modal secret used by both apps
+          # --force overwrites if it already exists
           modal secret create creativeos-secrets \
             HF_TOKEN="$HF_TOKEN" \
             MODAL_KEY_ID="$MODAL_KEY_ID" \
             MODAL_KEY_SECRET="$MODAL_KEY_SECRET" \
-            --force 2>/dev/null || \
-          modal secret create creativeos-secrets \
-            HF_TOKEN="$HF_TOKEN" \
-            MODAL_KEY_ID="$MODAL_KEY_ID" \
-            MODAL_KEY_SECRET="$MODAL_KEY_SECRET"
+            --force || true
           echo "Modal secret created/updated."
 
       - name: Deploy image generation app
@@ -75,10 +74,10 @@ jobs:
           echo "$OUTPUT"
           
           # Extract endpoint URL from Modal deploy output
-          IMAGE_URL=$(echo "$OUTPUT" | grep -oP 'https://[a-z0-9-]+\.modal\.run' | head -1)
+          # Modal prints: "Created web endpoint https://fjkiani--creativeos-image-gen-generate-endpoint.modal.run"
+          IMAGE_URL=$(echo "$OUTPUT" | grep -oP 'https://[a-zA-Z0-9._-]+\.modal\.run' | grep -v health | head -1)
           if [ -z "$IMAGE_URL" ]; then
-            # Try alternate pattern
-            IMAGE_URL=$(echo "$OUTPUT" | grep -oP 'https://[^\s]+creativeos-image-gen[^\s]*' | head -1)
+            IMAGE_URL=$(echo "$OUTPUT" | grep -oP 'https://[^\s]+' | grep modal | head -1)
           fi
           
           echo "Image endpoint: $IMAGE_URL"
@@ -95,9 +94,9 @@ jobs:
           OUTPUT=$(modal deploy modal_apps/video_gen.py 2>&1)
           echo "$OUTPUT"
           
-          VIDEO_URL=$(echo "$OUTPUT" | grep -oP 'https://[a-z0-9-]+\.modal\.run' | head -1)
+          VIDEO_URL=$(echo "$OUTPUT" | grep -oP 'https://[a-zA-Z0-9._-]+\.modal\.run' | grep -v health | head -1)
           if [ -z "$VIDEO_URL" ]; then
-            VIDEO_URL=$(echo "$OUTPUT" | grep -oP 'https://[^\s]+creativeos-video-gen[^\s]*' | head -1)
+            VIDEO_URL=$(echo "$OUTPUT" | grep -oP 'https://[^\s]+' | grep modal | head -1)
           fi
           
           echo "Video endpoint: $VIDEO_URL"
